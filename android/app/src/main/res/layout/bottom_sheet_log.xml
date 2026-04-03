@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@color/bg">
+
+    <!-- 拖动把手 -->
+    <View
+        android:layout_width="40dp"
+        android:layout_height="4dp"
+        android:layout_gravity="center_horizontal"
+        android:layout_marginTop="10dp"
+        android:layout_marginBottom="12dp"
+        android:background="#44FFFFFF"/>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="20dp" android:paddingEnd="8dp"
+        android:paddingBottom="8dp">
+
+        <TextView
+            android:text="运行日志"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:textColor="@color/text_primary"
+            android:layout_weight="1"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"/>
+
+        <Button
+            android:id="@+id/btnClearLog"
+            android:text="清除"
+            android:textSize="12sp"
+            android:textColor="@color/text_secondary"
+            android:background="@null"
+            android:paddingStart="8dp" android:paddingEnd="16dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"/>
+    </LinearLayout>
+
+    <ScrollView
+        android:id="@+id/scrollLog"
+        android:layout_width="match_parent"
+        android:layout_height="360dp"
+        android:background="@drawable/log_bg"
+        android:layout_marginStart="16dp" android:layout_marginEnd="16dp"
+        android:layout_marginBottom="24dp"
+        android:clipToOutline="true">
+
+        <TextView
+            android:id="@+id/tvLog"
+            android:text=""
+            android:textSize="11sp"
+            android:textColor="@color/log_text"
+            android:fontFamily="monospace"
+            android:padding="12dp"
+            android:lineSpacingMultiplier="1.4"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"/>
+    </ScrollView>
+
+</LinearLayout>

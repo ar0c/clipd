@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <!-- 模式选择 -->
+    <RadioGroup
+        android:id="@+id/rgMode"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="16dp" android:paddingEnd="16dp"
+        android:paddingTop="12dp" android:paddingBottom="4dp">
+
+        <RadioButton
+            android:id="@+id/rbInclude"
+            android:text="仅转发选中"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"/>
+
+        <RadioButton
+            android:id="@+id/rbExclude"
+            android:text="排除选中（转发其余）"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"/>
+    </RadioGroup>
+
+    <!-- 搜索框 -->
+    <EditText
+        android:id="@+id/etSearch"
+        android:hint="搜索应用名称..."
+        android:drawableStart="@android:drawable/ic_menu_search"
+        android:drawablePadding="8dp"
+        android:inputType="text"
+        android:imeOptions="actionSearch"
+        android:singleLine="true"
+        android:paddingStart="16dp" android:paddingEnd="16dp"
+        android:paddingTop="8dp" android:paddingBottom="8dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="8dp" android:layout_marginEnd="8dp"
+        android:layout_marginTop="4dp" android:layout_marginBottom="4dp"/>
+
+    <!-- 应用列表 -->
+    <ListView
+        android:id="@+id/lvApps"
+        android:layout_width="match_parent"
+        android:layout_height="320dp"
+        android:choiceMode="multipleChoice"
+        android:dividerHeight="0dp"/>
+
+</LinearLayout>
