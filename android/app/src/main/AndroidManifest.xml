@@ -53,6 +53,13 @@
             </intent-filter>
         </receiver>
 
+        <activity
+            android:name=".ClipReaderActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@style/Theme.Transparent" />
+
         <service
             android:name=".ClipSyncService"
             android:foregroundServiceType="dataSync"
@@ -76,6 +83,19 @@
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+        </service>
+
+        <service
+            android:name=".ClipboardIMEService"
+            android:exported="true"
+            android:label="clipd 剪切板同步"
+            android:permission="android.permission.BIND_INPUT_METHOD">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/ime_method" />
         </service>
 
         <service

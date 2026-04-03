@@ -19,6 +19,7 @@ class NotifListenerService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
+        if (Sync.appContext == null) Sync.appContext = applicationContext
         Sync.log("✓ 通知监听服务已连接")
     }
 

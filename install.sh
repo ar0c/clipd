@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INSTALL_DIR="$HOME/.local/share/clipd"
 BIN_DIR="$HOME/.local/bin"
 
-echo "=== clipd 安装 ==="
+echo "=== Clipd 桌面端 安装 ==="
 
 # 1. 依赖
 echo "安装依赖..."
@@ -29,7 +29,7 @@ chmod +x "$BIN_DIR/clipd"
 mkdir -p "$HOME/.config/systemd/user"
 cat > "$HOME/.config/systemd/user/clipd.service" << EOF
 [Unit]
-Description=clipd clipboard sync
+Description=Clipd Desktop clipboard sync
 After=graphical-session.target
 
 [Service]
@@ -53,8 +53,10 @@ systemctl --user restart clipd
 mkdir -p "$HOME/.local/share/applications"
 cat > "$HOME/.local/share/applications/clipd.desktop" << EOF
 [Desktop Entry]
-Name=clipd
-Comment=Android ↔ Ubuntu 剪贴板同步
+Name=Clipd Desktop
+Name[zh_CN]=Clipd 桌面端
+Comment=Android ↔ Ubuntu clipboard sync
+Comment[zh_CN]=Android ↔ Ubuntu 剪贴板同步
 Exec=$BIN_DIR/clipd
 Icon=edit-paste
 Terminal=false

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 构建 clipd Ubuntu AppImage（单文件可执行，无需安装）
+# 构建 Clipd 桌面端 Ubuntu AppImage（单文件可执行，无需安装）
 # 用法: ./dist/build_appimage.sh
 set -euo pipefail
 
@@ -42,8 +42,10 @@ ln -sf AppRun "$APPDIR/usr/bin/clipd"
 # .desktop
 cat > "$APPDIR/clipd.desktop" << EOF
 [Desktop Entry]
-Name=clipd
-Comment=Android ↔ Ubuntu 剪贴板同步
+Name=Clipd Desktop
+Name[zh_CN]=Clipd 桌面端
+Comment=Android ↔ Ubuntu clipboard sync
+Comment[zh_CN]=Android ↔ Ubuntu 剪贴板同步
 Exec=clipd
 Icon=clipd
 Type=Application

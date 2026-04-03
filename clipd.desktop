@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Clipd
+Comment=Android-Ubuntu clipboard sync manager
+Exec=python3 /home/ar0c/.local/share/clipd/clipd_ui.py
+Icon=edit-paste
+Terminal=false
+Type=Application
+Categories=Utility;
+StartupWMClass=com.clipd.manager

@@ -1,12 +1,17 @@
 package com.clipd
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ClipboardManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 
+/**
+ * 无障碍服务：检测复制动作，触发 ClipSyncService（有 overlay）读取剪切板。
+ */
 class ClipboardAccessibilityService : AccessibilityService() {
 
     private var clipboardManager: ClipboardManager? = null
@@ -14,47 +19,67 @@ class ClipboardAccessibilityService : AccessibilityService() {
     private var lastHash = ""
     private var pendingCheck = false
 
-    // 检测"复制"相关的关键词
-    private val copyKeywords = listOf(
-        "复制", "拷贝", "copy", "Copy", "COPY",
-        "已复制", "已拷贝", "Copied", "copied"
+    private val clickKeywords = listOf("复制", "拷贝", "Copy", "COPY")
+    private val toastKeywords = listOf(
+        "已复制", "已拷贝", "Copied", "copied",
+        "复制成功", "已复制到剪贴板", "内容已复制"
     )
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        if (Sync.appContext == null) Sync.appContext = applicationContext
         clipboardManager = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
-        // 初始化 hash
+
+        serviceInfo = serviceInfo.apply {
+            eventTypes = AccessibilityEvent.TYPE_VIEW_CLICKED or
+                         AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
+                         AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                         AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED
+            feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
+            flags = AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS or
+                    AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS
+            notificationTimeout = 100
+        }
+
         try {
             val text = clipboardManager?.primaryClip?.getItemAt(0)?.text?.toString()
             if (!text.isNullOrBlank()) lastHash = text.hashCode().toString()
         } catch (_: Exception) {}
-        Log.i(Sync.TAG, "ClipboardAccessibilityService connected")
+        Log.w(Sync.TAG, "ClipboardAccessibilityService connected")
         Sync.log("无障碍剪切板监听已连接")
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
 
+        val eventText = event.text?.joinToString("") ?: ""
+        val pkg = event.packageName?.toString() ?: ""
+        val desc = event.contentDescription?.toString() ?: ""
+
+        if (pkg == "com.android.systemui" || pkg == "com.vivo.timerwidget" ||
+            pkg == "com.vivo.notification") return
+
         when (event.eventType) {
             AccessibilityEvent.TYPE_VIEW_CLICKED -> {
-                // 用户点击了按钮 — 检查是否是"复制"按钮
-                val text = event.text?.joinToString("") ?: ""
-                val desc = event.contentDescription?.toString() ?: ""
-                if (copyKeywords.any { text.contains(it) || desc.contains(it) }) {
+                if (clickKeywords.any { eventText == it || desc == it }) {
+                    Sync.log("📋 复制按钮: $eventText ($pkg)")
+                    scheduleClipboardCheck()
+                }
+            }
+            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
+                if (eventText.length < 50 && toastKeywords.any { eventText.contains(it) }) {
+                    Sync.log("📋 复制确认: $eventText ($pkg)")
                     scheduleClipboardCheck()
                 }
             }
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
-                // Toast / popup 出现（如"已复制到剪贴板"）
-                val text = event.text?.joinToString("") ?: ""
-                if (copyKeywords.any { text.contains(it) }) {
+                if (eventText.length < 50 && toastKeywords.any { eventText.contains(it) }) {
+                    Sync.log("📋 窗口确认: $eventText ($pkg)")
                     scheduleClipboardCheck()
                 }
             }
             AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                // 某些系统在复制时触发 content changed
-                val text = event.text?.joinToString("") ?: ""
-                if (copyKeywords.any { text.contains(it) }) {
+                if (eventText.length < 30 && toastKeywords.any { eventText.contains(it) }) {
                     scheduleClipboardCheck()
                 }
             }
@@ -64,34 +89,19 @@ class ClipboardAccessibilityService : AccessibilityService() {
     private fun scheduleClipboardCheck() {
         if (pendingCheck) return
         pendingCheck = true
-        // 延迟 300ms 让剪切板数据就绪
-        handler.postDelayed({
-            pendingCheck = false
-            readAndSync()
-        }, 300)
-    }
 
-    private fun readAndSync() {
-        try {
-            val cm = clipboardManager ?: return
-            val clip = cm.primaryClip
-            if (clip == null || clip.itemCount == 0) return
-            val text = clip.getItemAt(0)?.text?.toString()
-            if (!text.isNullOrBlank()) {
-                val hash = text.hashCode().toString()
-                if (hash != lastHash && hash != Sync.lastSentHash) {
-                    lastHash = hash
-                    Sync.sendText(text)
-                }
+        // 触发 ClipSyncService（有 overlay 权限）读取剪切板
+        handler.postDelayed({
+            val svc = ClipSyncService.instance
+            if (svc != null) {
+                svc.readClipboardNow()
+            } else {
+                Sync.log("⚠ ClipSyncService 未运行")
             }
-        } catch (e: Exception) {
-            Sync.log("⚠ 无障碍读剪切板失败: ${e.message}")
-        }
+            pendingCheck = false
+        }, 150)
     }
 
     override fun onInterrupt() {}
-
-    override fun onDestroy() {
-        super.onDestroy()
-    }
+    override fun onDestroy() { super.onDestroy() }
 }

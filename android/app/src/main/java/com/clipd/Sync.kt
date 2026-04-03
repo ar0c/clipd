@@ -79,13 +79,24 @@ object Sync {
     }
 
     fun log(msg: String) {
-        Log.i(TAG, msg)
+        Log.w(TAG, msg)
         val fmt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault())
         val line = "[${fmt.format(java.util.Date())}] $msg"
         synchronized(logBuffer) {
             logBuffer.addLast(line)
             if (logBuffer.size > 200) logBuffer.removeFirst()
         }
+        // 写文件日志（vivo 屏蔽 logcat）
+        try {
+            val ctx = appContext ?: return@log
+            val file = java.io.File(ctx.filesDir, "clipd.log")
+            file.appendText(line + "\n")
+            // 限制文件大小 200KB
+            if (file.length() > 200_000) {
+                val lines = file.readLines()
+                file.writeText(lines.takeLast(500).joinToString("\n") + "\n")
+            }
+        } catch (_: Exception) {}
         appContext?.sendBroadcast(
             android.content.Intent(ACTION_LOG).putExtra("msg", msg)
         )
@@ -94,8 +105,14 @@ object Sync {
     fun getLogHistory(): List<String> = synchronized(logBuffer) { logBuffer.toList() }
     fun clearLog() = synchronized(logBuffer) { logBuffer.clear() }
 
+    private fun resolveIp(): String? {
+        ubuntuIp?.let { return it }
+        val ctx = appContext ?: return null
+        return getSavedUbuntuIp(ctx)?.also { ubuntuIp = it }
+    }
+
     fun sendText(text: String) {
-        val ip = ubuntuIp ?: return
+        val ip = resolveIp() ?: run { log("⏭ sendText 跳过: ubuntuIp 为空"); return }
         val hash = text.hashCode().toString()
         if (hash == lastSentHash) return
         lastSentHash = hash
@@ -125,7 +142,7 @@ object Sync {
     }
 
     fun sendImage(file: File) {
-        val ip = ubuntuIp ?: return
+        val ip = resolveIp() ?: run { log("⏭ sendImage 跳过: ubuntuIp 为空"); return }
         executor.execute {
             try {
                 val boundary = "clipdboundary"

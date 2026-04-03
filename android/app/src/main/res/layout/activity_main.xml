@@ -136,6 +136,38 @@
             android:layout_height="wrap_content"/>
     </LinearLayout>
 
+    <!-- ── 输入法剪切板权限 ── -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp" android:layout_marginEnd="16dp"
+        android:layout_marginBottom="12dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="16dp" android:paddingEnd="16dp"
+        android:paddingTop="10dp" android:paddingBottom="10dp"
+        android:background="@drawable/card_bg">
+
+        <TextView
+            android:id="@+id/tvIMEStatus"
+            android:text="检查输入法状态..."
+            android:textSize="13sp"
+            android:textColor="@color/text_secondary"
+            android:layout_weight="1"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"/>
+
+        <Button
+            android:id="@+id/btnIMEEnable"
+            android:text="前往开启"
+            android:textColor="@color/primary"
+            android:textSize="12sp"
+            android:background="@null"
+            android:paddingStart="8dp" android:paddingEnd="8dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"/>
+    </LinearLayout>
+
     <!-- ── 通知镜像卡片 ── -->
     <LinearLayout
         android:layout_width="match_parent"

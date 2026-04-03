@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<input-method xmlns:android="http://schemas.android.com/apk/res/android"
+    android:settingsActivity="com.clipd.MainActivity">
+    <subtype
+        android:imeSubtypeMode="keyboard"
+        android:imeSubtypeLocale="zh_CN"
+        android:label="clipd 剪切板同步" />
+</input-method>

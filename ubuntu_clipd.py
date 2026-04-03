@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-clipd - Ubuntu 端剪切板同步守护进程
+Clipd 桌面端 - Ubuntu 端剪切板同步守护进程
 - 接收来自 Android 的文字 / 图片，写入本机剪切板
 - 监听本机剪切板变化，推送到 Android
 - mDNS + UDP 广播自动发现 Android，无需手动输入 IP
@@ -27,6 +27,9 @@ UBUNTU_PORT     = 8888
 ANDROID_PORT    = 8889
 DISCOVERY_PORT  = 8890
 BROADCAST_INTERVAL = 3
+APP_ID          = "clipd"
+APP_DISPLAY_NAME = "Clipd 桌面端"
+_notify_inited  = False
 
 _last_hash     = ""
 _lock          = threading.Lock()
@@ -35,6 +38,27 @@ _android_lock  = threading.Lock()
 _wl_copy_proc  = None
 _wl_copy_lock  = threading.Lock()
 _tray_icon     = None
+
+# ── 统计与日志 ──
+_stats = {"sent": 0, "recv": 0, "notif": 0, "start_time": None}
+_log_lines: list[str] = []
+_log_lock  = threading.Lock()
+_ui_update_fn = None   # GUI 回调，由 GTK 窗口设置
+
+
+def _add_log(msg: str):
+    ts = time.strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}"
+    with _log_lock:
+        _log_lines.append(line)
+        if len(_log_lines) > 500:
+            _log_lines[:] = _log_lines[-300:]
+    print(f"[clipd] {msg}", flush=True)
+    if _ui_update_fn:
+        try:
+            _ui_update_fn()
+        except Exception:
+            pass
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
@@ -106,16 +130,40 @@ def notify(msg: str, img_data: bytes = None):
             cleanup = tmp.name
         except Exception:
             pass
-    subprocess.Popen(
-        ["notify-send", "clipd", msg, f"--icon={icon}", "--expire-time=4000"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    _send_notification(APP_DISPLAY_NAME, msg, icon=icon, expire_time=4000)
     if cleanup:
         def _rm():
             time.sleep(6)
             try: os.unlink(cleanup)
             except: pass
         threading.Thread(target=_rm, daemon=True).start()
+
+
+def _send_notification(summary: str, body: str = "", icon: str = "edit-paste", expire_time: int = 4000):
+    global _notify_inited
+    try:
+        import gi
+        gi.require_version("Notify", "0.7")
+        from gi.repository import Notify, GLib
+
+        if not _notify_inited:
+            Notify.init(APP_DISPLAY_NAME)
+            _notify_inited = True
+
+        n = Notify.Notification.new(summary, body or None, icon)
+        n.set_app_name(APP_DISPLAY_NAME)
+        try:
+            n.set_hint("desktop-entry", GLib.Variant("s", "clipd.desktop"))
+        except Exception:
+            pass
+        n.set_timeout(expire_time)
+        n.show()
+        return
+    except Exception:
+        pass
+
+    cmd = ["notify-send", APP_DISPLAY_NAME, body or summary, f"--icon={icon}", f"--expire-time={expire_time}"]
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 # ── 系统托盘 ──────────────────────────────────────────────────────────────────
@@ -140,15 +188,21 @@ def _tray_menu(status_text: str):
     )
 
 
+def _tray_status(connected: bool, label: str = "") -> str:
+    if label:
+        return f"{APP_DISPLAY_NAME} - {label}"
+    return f"{APP_DISPLAY_NAME} - {'已连接' if connected else '等待连接'}"
+
+
 def create_tray():
     global _tray_icon
     try:
         import pystray
         _tray_icon = pystray.Icon(
-            "clipd",
+            APP_ID,
             _make_tray_image(False),
-            "clipd - 等待连接",
-            _tray_menu("clipd - 等待连接"),
+            _tray_status(False),
+            _tray_menu(_tray_status(False)),
         )
         _tray_icon.run_detached()
         print("[clipd] 托盘图标已启动")
@@ -162,7 +216,7 @@ def update_tray(connected: bool, label: str = ""):
     if _tray_icon is None:
         return
     try:
-        status = f"clipd - {label}" if label else ("clipd - 已连接" if connected else "clipd - 等待连接")
+        status = _tray_status(connected, label)
         _tray_icon.icon  = _make_tray_image(connected)
         _tray_icon.title = status
         _tray_icon.menu  = _tray_menu(status)
@@ -335,7 +389,7 @@ def listen_for_android():
                 with _android_lock:
                     if _android_ip != ip:
                         _android_ip = ip
-                        print(f"[clipd] Android 已配对: {ip}")
+                        _add_log(f"Android 已配对: {ip}")
                         notify(f"Android 已连接: {ip}")
                         update_tray(True, f"已连接 Android: {ip}")
         except Exception:
@@ -481,15 +535,15 @@ class ClipHandler(http.server.BaseHTTPRequestHandler):
             app_name = data.get("appName", "Android")
             title    = data.get("title", "")
             text     = data.get("text", "")
-            summary  = f"{title}: {text}" if title and text else (title or text)
-            subprocess.Popen(
-                ["notify-send", app_name, summary,
-                 "--icon=notification-message-im", "--expire-time=6000"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            print(f"[clipd] ← Android 通知: {app_name} / {title}", flush=True)
+            summary = f"{app_name} · {title}" if title else app_name
+            body_text = text if text else ""
+            if not body_text and title and title != app_name:
+                body_text = title
+            _send_notification(summary, body_text, icon="notification-message-im", expire_time=6000)
+            _stats["notif"] += 1
+            _add_log(f"← 通知: {app_name} / {title}")
         except Exception as e:
-            print(f"[clipd] 通知处理失败: {e}", flush=True)
+            _add_log(f"通知处理失败: {e}")
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"ok")
@@ -517,9 +571,10 @@ class ClipHandler(http.server.BaseHTTPRequestHandler):
                 try:
                     set_image(png)
                     notify("截图已同步 ← Android", png)
-                    print("[clipd] wl-copy 成功", flush=True)
+                    _stats["recv"] += 1
+                    _add_log(f"← Android: 图片 {len(img)//1024}KB")
                 except Exception as e:
-                    print(f"[clipd] wl-copy 失败: {e}", flush=True)
+                    _add_log(f"wl-copy 失败: {e}")
         else:
             params = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"))
             text   = params.get("text", [""])[0]
@@ -529,6 +584,8 @@ class ClipHandler(http.server.BaseHTTPRequestHandler):
                     _last_hash = h
                 set_text(text)
                 notify(f"文字已同步 ← Android: {text[:40]}")
+                _stats["recv"] += 1
+                _add_log(f"← Android: 文字 {repr(text[:40])}")
 
         self.send_response(200)
         self.end_headers()
@@ -576,7 +633,8 @@ def _do_push():
                     return
                 _last_hash = h
             send_to_android(img, is_image=True)
-            print(f"[clipd] → Android: 图片 ({len(img)//1024}KB)", flush=True)
+            _stats["sent"] += 1
+            _add_log(f"→ Android: 图片 ({len(img)//1024}KB)")
             return
         text = get_text()
         if text:
@@ -586,7 +644,8 @@ def _do_push():
                     return
                 _last_hash = h
             send_to_android(text)
-            print(f"[clipd] → Android: 文字 {repr(text[:40])}", flush=True)
+            _stats["sent"] += 1
+            _add_log(f"→ Android: 文字 {repr(text[:40])}")
     except Exception as e:
         print(f"[clipd] push error: {e}", flush=True)
 
@@ -658,18 +717,18 @@ def watch_and_push():
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    _stats["start_time"] = time.time()
     create_tray()
 
     if len(sys.argv) >= 2:
         _android_ip = sys.argv[1]
-        print(f"[clipd] 启动（手动指定 Android: {_android_ip}）")
+        _add_log(f"启动（手动指定 Android: {_android_ip}）")
         update_tray(True, f"已连接 Android: {_android_ip}")
     else:
-        print("[clipd] 启动（自动发现模式）")
+        _add_log("启动（自动发现模式）")
         advertise_mdns()
         threading.Thread(target=broadcast_presence, daemon=True).start()
         threading.Thread(target=listen_for_android, daemon=True).start()
-        # 15 秒后若仍未发现，启动跨网段 TCP 扫描
         def _delayed_scan():
             time.sleep(15)
             with _android_lock:
@@ -679,11 +738,7 @@ if __name__ == "__main__":
         threading.Thread(target=_delayed_scan, daemon=True).start()
 
     lan_ip = get_lan_ip()
-    print(f"  本机 IP:   {lan_ip}")
-    print(f"  HTTP 监听: :{UBUNTU_PORT}")
-    print(f"  UDP 发现:  :{DISCOVERY_PORT}")
-    print(f"  mDNS:      clipd._clipd._tcp.local")
-    print(f"  配对码:    clipd://connect?ip={lan_ip}&port={UBUNTU_PORT}")
+    _add_log(f"本机 IP: {lan_ip}:{UBUNTU_PORT}")
 
     import concurrent.futures
     _push_executor = concurrent.futures.ThreadPoolExecutor(

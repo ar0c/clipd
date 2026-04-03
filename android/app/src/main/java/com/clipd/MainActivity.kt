@@ -47,6 +47,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnToggle: Button
     private lateinit var btnAccessibility: Button
     private lateinit var tvLogBadge: TextView
+    private lateinit var tvIMEStatus: TextView
+    private lateinit var btnIMEEnable: Button
     private lateinit var tvNotifStatus: TextView
     private lateinit var btnNotifAccess: Button
     private lateinit var switchNotifMirror: Switch
@@ -130,6 +132,12 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnShowLog).setOnClickListener { showLogSheet() }
         findViewById<Button>(R.id.btnSettings).setOnClickListener { showSettingsDialog() }
 
+        tvIMEStatus = findViewById(R.id.tvIMEStatus)
+        btnIMEEnable = findViewById(R.id.btnIMEEnable)
+        btnIMEEnable.setOnClickListener {
+            startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
+        }
+
         tvNotifStatus = findViewById(R.id.tvNotifStatus)
         btnNotifAccess = findViewById(R.id.btnNotifAccess)
         switchNotifMirror = findViewById(R.id.switchNotifMirror)
@@ -179,6 +187,7 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         syncServiceState()
         updateAccessibilityStatus()
+        updateIMEStatus()
         updateNotifListenerStatus()
     }
 
@@ -227,6 +236,7 @@ class MainActivity : AppCompatActivity() {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             updateAccessibilityStatus()
+            updateIMEStatus()
             updateNotifListenerStatus()
         }
     }
@@ -454,6 +464,23 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    private fun updateIMEStatus() {
+        if (isIMEEnabled()) {
+            tvIMEStatus.text = "✓ 输入法剪切板已启用"
+            tvIMEStatus.setTextColor(getColor(R.color.connected))
+            btnIMEEnable.text = "设置"
+        } else {
+            tvIMEStatus.text = "⚠ 需开启输入法以读取剪切板"
+            tvIMEStatus.setTextColor(getColor(R.color.warning))
+            btnIMEEnable.text = "前往开启"
+        }
+    }
+
+    private fun isIMEEnabled(): Boolean {
+        val imm = getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
+        return imm.enabledInputMethodList.any { it.packageName == packageName }
+    }
+
     private fun isAccessibilityEnabled(): Boolean {
         val service = "$packageName/$packageName.ClipboardAccessibilityService"
         return try {
@@ -533,8 +560,9 @@ class MainActivity : AppCompatActivity() {
         isRunning = true
         btnToggle.text = "停止同步"
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("started_once", true).apply()
+        // 无 WiFi 也启动服务（剪切板监听不依赖网络）
         if (!isWifiConnected()) {
-            setState(AppState.NO_WIFI, "连接 WiFi 后自动开始搜索")
+            setState(AppState.SEARCHING, "无 WiFi，剪切板监听已启动")
         } else {
             val ip = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_IP, "")
             if (!ip.isNullOrBlank()) verifyAndConnect(ip)

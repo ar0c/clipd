@@ -33,6 +33,8 @@ class ClipSyncService : Service() {
         const val NOTIF_EVENT_ID = 2
         const val ACTION_STATUS = "com.clipd.STATUS"
         const val ACTION_SYNC_CLIP = "com.clipd.SYNC_CLIP"
+
+        @Volatile var instance: ClipSyncService? = null
     }
 
     private var screenshotObserver: ContentObserver? = null
@@ -44,6 +46,9 @@ class ClipSyncService : Service() {
 
     private var overlayView: android.view.View? = null
     private var lastClipHash = ""
+
+    fun getLastClipHash(): String = lastClipHash
+    fun setLastClipHash(hash: String) { lastClipHash = hash }
 
     private val clipListener = android.content.ClipboardManager.OnPrimaryClipChangedListener {
         val cm = clipboardManager ?: return@OnPrimaryClipChangedListener
@@ -62,6 +67,7 @@ class ClipSyncService : Service() {
     }
 
     private var clipPollRunnable: Runnable? = null
+    private var clipReadReceiver: android.content.BroadcastReceiver? = null
 
     private fun registerClipboardListener() {
         clipboardManager = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -82,7 +88,104 @@ class ClipSyncService : Service() {
 
         // vivo 等 OEM 不触发 OnPrimaryClipChangedListener，轮询兜底
         clipPollRunnable = object : Runnable {
+            private var pollCount = 0
             override fun run() {
+                try {
+                    val clip = clipboardManager?.primaryClip
+                    pollCount++
+                    if (pollCount <= 5 || pollCount % 10 == 0) {
+                        val preview = try { clip?.getItemAt(0)?.text?.toString()?.take(20) } catch (_: Exception) { null }
+                        Sync.log("🔄 轮询 #$pollCount clip=${if (clip != null) "有($preview)" else "null"} overlay=${overlayView != null}")
+                    }
+                    if (clip != null && clip.itemCount > 0) {
+                        val text = clip.getItemAt(0)?.text?.toString()
+                        if (!text.isNullOrBlank()) {
+                            val hash = text.hashCode().toString()
+                            if (hash != lastClipHash && hash != Sync.lastSentHash) {
+                                lastClipHash = hash
+                                Sync.log("📤 轮询捕获: ${text.take(40)}")
+                                Sync.sendText(text)
+                                sendEventNotification("剪切板已同步", "→ ${text.take(60)}")
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Sync.log("🔄 轮询异常: ${e.message}")
+                }
+                mainHandler.postDelayed(this, 3000)
+            }
+        }
+        mainHandler.postDelayed(clipPollRunnable!!, 3000)
+
+        // 接收无障碍服务的"立即读取"广播
+        clipReadReceiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(ctx: android.content.Context?, intent: android.content.Intent?) {
+                Sync.log("📋 收到立即读取请求")
+                // 多次重试，给系统时间写入剪切板
+                val delays = longArrayOf(100, 300, 600, 1200)
+                for (delay in delays) {
+                    mainHandler.postDelayed({
+                        try {
+                            val clip = clipboardManager?.primaryClip
+                            if (clip != null && clip.itemCount > 0) {
+                                val text = clip.getItemAt(0)?.text?.toString()
+                                if (!text.isNullOrBlank()) {
+                                    val hash = text.hashCode().toString()
+                                    if (hash != lastClipHash && hash != Sync.lastSentHash) {
+                                        lastClipHash = hash
+                                        Sync.log("📤 无障碍触发发送: ${text.take(40)}")
+                                        Sync.sendText(text)
+                                    }
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }, delay)
+                }
+            }
+        }
+        registerReceiver(clipReadReceiver, android.content.IntentFilter("com.clipd.READ_CLIPBOARD_NOW"),
+            android.content.Context.RECEIVER_NOT_EXPORTED)
+    }
+
+    /** 无障碍服务调用：临时创建可获焦 overlay 读取剪切板 */
+    fun readClipboardNow() {
+        mainHandler.post { readWithTempFocusableOverlay() }
+    }
+
+    /**
+     * 临时添加一个可获焦的 overlay，读取剪切板后立即移除。
+     * 参考 MacroDroid/Tasker 的 "Clipboard Refresh" 实现。
+     */
+    private fun readWithTempFocusableOverlay() {
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            Sync.log("⚠ 无悬浮窗权限，无法临时获焦读取")
+            return
+        }
+        val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
+        val tempView = android.view.View(this).apply {
+            setBackgroundColor(android.graphics.Color.TRANSPARENT)
+        }
+        val params = android.view.WindowManager.LayoutParams(
+            1, 1,
+            android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            android.graphics.PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = android.view.Gravity.START or android.view.Gravity.TOP
+            x = 0; y = 0
+        }
+
+        try {
+            wm.addView(tempView, params)
+        } catch (e: Exception) {
+            Sync.log("⚠ 临时 overlay 创建失败: ${e.message}")
+            return
+        }
+
+        // 多次延迟读取，读完后移除
+        val delays = longArrayOf(50, 150, 400, 800)
+        for (delay in delays) {
+            mainHandler.postDelayed({
                 try {
                     val clip = clipboardManager?.primaryClip
                     if (clip != null && clip.itemCount > 0) {
@@ -91,15 +194,20 @@ class ClipSyncService : Service() {
                             val hash = text.hashCode().toString()
                             if (hash != lastClipHash && hash != Sync.lastSentHash) {
                                 lastClipHash = hash
+                                Sync.log("📤 剪切板已捕获: ${text.take(40)}")
                                 Sync.sendText(text)
+                                sendEventNotification("剪切板已同步", "→ ${text.take(60)}")
                             }
                         }
                     }
                 } catch (_: Exception) {}
-                mainHandler.postDelayed(this, 3000)
-            }
+            }, delay)
         }
-        mainHandler.postDelayed(clipPollRunnable!!, 3000)
+
+        // 最迟 1 秒后移除临时 overlay，归还焦点
+        mainHandler.postDelayed({
+            try { wm.removeView(tempView) } catch (_: Exception) {}
+        }, 1000)
     }
 
     private fun addOverlay() {
@@ -208,6 +316,7 @@ class ClipSyncService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
         Sync.appContext = applicationContext
         createNotificationChannel()
         // 恢复保存的手动 IP
@@ -255,6 +364,7 @@ class ClipSyncService : Service() {
         runCatching { (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager)
             .unregisterNetworkCallback(networkCallback) }
         runCatching { unregisterReceiver(reconnectReceiver) }
+        clipReadReceiver?.let { runCatching { unregisterReceiver(it) } }
         super.onDestroy()
     }
 
