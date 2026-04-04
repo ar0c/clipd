@@ -47,8 +47,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnToggle: Button
     private lateinit var btnAccessibility: Button
     private lateinit var tvLogBadge: TextView
-    private lateinit var tvIMEStatus: TextView
-    private lateinit var btnIMEEnable: Button
     private lateinit var tvNotifStatus: TextView
     private lateinit var btnNotifAccess: Button
     private lateinit var switchNotifMirror: Switch
@@ -132,12 +130,6 @@ class MainActivity : AppCompatActivity() {
         findViewById<Button>(R.id.btnShowLog).setOnClickListener { showLogSheet() }
         findViewById<Button>(R.id.btnSettings).setOnClickListener { showSettingsDialog() }
 
-        tvIMEStatus = findViewById(R.id.tvIMEStatus)
-        btnIMEEnable = findViewById(R.id.btnIMEEnable)
-        btnIMEEnable.setOnClickListener {
-            startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS))
-        }
-
         tvNotifStatus = findViewById(R.id.tvNotifStatus)
         btnNotifAccess = findViewById(R.id.btnNotifAccess)
         switchNotifMirror = findViewById(R.id.switchNotifMirror)
@@ -187,7 +179,6 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         syncServiceState()
         updateAccessibilityStatus()
-        updateIMEStatus()
         updateNotifListenerStatus()
     }
 
@@ -236,7 +227,6 @@ class MainActivity : AppCompatActivity() {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
             updateAccessibilityStatus()
-            updateIMEStatus()
             updateNotifListenerStatus()
         }
     }
@@ -358,14 +348,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateAccessibilityStatus() {
-        if (isAccessibilityEnabled()) {
+        val a11y = isAccessibilityEnabled()
+        val overlay = android.provider.Settings.canDrawOverlays(this)
+
+        if (a11y && overlay) {
             tvAccessibility.text = "✓ 剪切板自动同步已启用"
             tvAccessibility.setTextColor(getColor(R.color.connected))
             btnAccessibility.text = "设置"
+        } else if (!overlay) {
+            tvAccessibility.text = "⚠ 需授予悬浮窗权限（剪切板同步必需）"
+            tvAccessibility.setTextColor(getColor(R.color.warning))
+            btnAccessibility.text = "前往授权"
+            btnAccessibility.setOnClickListener {
+                startActivity(Intent(
+                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:$packageName")
+                ))
+            }
         } else {
-            tvAccessibility.text = "⚠ 需开启辅助功能以同步剪切板"
+            tvAccessibility.text = "⚠ 需开启辅助功能以检测复制操作"
             tvAccessibility.setTextColor(getColor(R.color.warning))
             btnAccessibility.text = "前往开启"
+            btnAccessibility.setOnClickListener {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
         }
     }
 
@@ -464,23 +470,6 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun updateIMEStatus() {
-        if (isIMEEnabled()) {
-            tvIMEStatus.text = "✓ 输入法剪切板已启用"
-            tvIMEStatus.setTextColor(getColor(R.color.connected))
-            btnIMEEnable.text = "设置"
-        } else {
-            tvIMEStatus.text = "⚠ 需开启输入法以读取剪切板"
-            tvIMEStatus.setTextColor(getColor(R.color.warning))
-            btnIMEEnable.text = "前往开启"
-        }
-    }
-
-    private fun isIMEEnabled(): Boolean {
-        val imm = getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager
-        return imm.enabledInputMethodList.any { it.packageName == packageName }
-    }
-
     private fun isAccessibilityEnabled(): Boolean {
         val service = "$packageName/$packageName.ClipboardAccessibilityService"
         return try {
@@ -515,9 +504,9 @@ class MainActivity : AppCompatActivity() {
                 viewStatusDot.background = getDrawable(R.drawable.dot_gray)
             }
             AppState.NO_WIFI -> {
-                tvStatus.text = "无 WiFi"
+                tvStatus.text = "本地监听中"
                 tvStatus.setTextColor(getColor(R.color.warning))
-                tvStatusSub.text = detail.ifBlank { "请连接 WiFi 后使用同步" }
+                tvStatusSub.text = detail.ifBlank { "剪切板监听已启动，连接 WiFi 后可同步到 Ubuntu" }
                 cardStatus.background = getDrawable(R.drawable.status_bg_warning)
                 viewStatusDot.background = getDrawable(R.drawable.dot_orange)
             }
@@ -560,9 +549,8 @@ class MainActivity : AppCompatActivity() {
         isRunning = true
         btnToggle.text = "停止同步"
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("started_once", true).apply()
-        // 无 WiFi 也启动服务（剪切板监听不依赖网络）
         if (!isWifiConnected()) {
-            setState(AppState.SEARCHING, "无 WiFi，剪切板监听已启动")
+            setState(AppState.NO_WIFI)
         } else {
             val ip = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_IP, "")
             if (!ip.isNullOrBlank()) verifyAndConnect(ip)

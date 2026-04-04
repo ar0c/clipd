@@ -5,7 +5,8 @@ plugins {
 
 android {
     namespace = "com.clipd"
-    compileSdk = 34
+    compileSdk = 36
+    compileSdkExtension = 18
 
     val legacyDebugKeystore = file("${System.getProperty("user.home")}/.android/debug.keystore")
 
@@ -23,9 +24,9 @@ android {
     defaultConfig {
         applicationId = "com.clipd"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 51
-        versionName = "1.0.51"
+        targetSdk = 36
+        versionCode = 58
+        versionName = "1.0.58"
     }
 
     buildTypes {
@@ -54,13 +55,13 @@ configurations.all {
         force("androidx.customview:customview:1.1.0")
         force("androidx.activity:activity:1.8.0")
         force("androidx.drawerlayout:drawerlayout:1.1.1")
-        force("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.20")
-        force("org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.20")
+        force("org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.0.21")
+        force("org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.0.21")
     }
 }
 
 dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
-    implementation("androidx.core:core-ktx:1.12.0")
+    implementation("androidx.core:core-ktx:1.16.0")
     implementation("com.google.android.material:material:1.11.0")
 }

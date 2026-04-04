@@ -28,7 +28,7 @@ class ClipSyncService : Service() {
 
     companion object {
         const val NOTIF_CHANNEL = "clipd_service"
-        const val NOTIF_EVENT_CHANNEL = "clipd_events"
+        const val NOTIF_EVENT_CHANNEL = "clipd_sync_alert"
         const val NOTIF_ID = 1
         const val NOTIF_EVENT_ID = 2
         const val ACTION_STATUS = "com.clipd.STATUS"
@@ -51,19 +51,8 @@ class ClipSyncService : Service() {
     fun setLastClipHash(hash: String) { lastClipHash = hash }
 
     private val clipListener = android.content.ClipboardManager.OnPrimaryClipChangedListener {
-        val cm = clipboardManager ?: return@OnPrimaryClipChangedListener
-        try {
-            val clip = cm.primaryClip
-            if (clip == null || clip.itemCount == 0) return@OnPrimaryClipChangedListener
-            val text = clip.getItemAt(0)?.text?.toString()
-            if (!text.isNullOrBlank()) {
-                val hash = text.hashCode().toString()
-                if (hash != lastClipHash && hash != Sync.lastSentHash) {
-                    lastClipHash = hash
-                    Sync.sendText(text)
-                }
-            }
-        } catch (_: Exception) {}
+        Sync.log("📋 clipListener 触发")
+        mainHandler.post { readWithTempFocusableOverlay() }
     }
 
     private var clipPollRunnable: Runnable? = null
@@ -86,17 +75,13 @@ class ClipSyncService : Service() {
             Sync.log("⚠ 未授予悬浮窗权限，后台剪切板同步可能受限")
         }
 
-        // vivo 等 OEM 不触发 OnPrimaryClipChangedListener，轮询兜底
+        // 轮询兜底：尝试直接读取（app 在前台时有效），否则用临时 overlay
         clipPollRunnable = object : Runnable {
             private var pollCount = 0
             override fun run() {
+                pollCount++
                 try {
                     val clip = clipboardManager?.primaryClip
-                    pollCount++
-                    if (pollCount <= 5 || pollCount % 10 == 0) {
-                        val preview = try { clip?.getItemAt(0)?.text?.toString()?.take(20) } catch (_: Exception) { null }
-                        Sync.log("🔄 轮询 #$pollCount clip=${if (clip != null) "有($preview)" else "null"} overlay=${overlayView != null}")
-                    }
                     if (clip != null && clip.itemCount > 0) {
                         val text = clip.getItemAt(0)?.text?.toString()
                         if (!text.isNullOrBlank()) {
@@ -109,9 +94,7 @@ class ClipSyncService : Service() {
                             }
                         }
                     }
-                } catch (e: Exception) {
-                    Sync.log("🔄 轮询异常: ${e.message}")
-                }
+                } catch (_: Exception) {}
                 mainHandler.postDelayed(this, 3000)
             }
         }
@@ -588,9 +571,14 @@ class ClipSyncService : Service() {
             NotificationChannel(NOTIF_CHANNEL, "clipd 同步服务",
                 NotificationManager.IMPORTANCE_LOW).apply { description = "保持剪切板同步" }
         )
+        // 删除旧通道（importance 可能被缓存为低）
+        nm.deleteNotificationChannel("clipd_events")
         nm.createNotificationChannel(
-            NotificationChannel(NOTIF_EVENT_CHANNEL, "clipd 事件",
-                NotificationManager.IMPORTANCE_DEFAULT).apply { description = "连接和同步事件" }
+            NotificationChannel(NOTIF_EVENT_CHANNEL, "clipd 同步提醒",
+                NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "剪切板同步成功提醒"
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+            }
         )
     }
 
@@ -601,15 +589,25 @@ class ClipSyncService : Service() {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
+    private var eventNotifCounter = 0
+
     private fun sendEventNotification(title: String, text: String) {
+        val nm = getSystemService(NotificationManager::class.java)
+        // 每次用不同 ID，避免 setOnlyAlertOnce 效果 + Android 16 首次不弹的 bug
+        val nid = NOTIF_EVENT_ID + (eventNotifCounter++ % 5)
         val notif = NotificationCompat.Builder(this, NOTIF_EVENT_CHANNEL)
             .setContentTitle(title)
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_menu_share)
-            .setAutoCancel(true)
+            .setSmallIcon(R.drawable.ic_notif)
             .setContentIntent(launchIntent())
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setAutoCancel(true)
             .build()
-        getSystemService(NotificationManager::class.java).notify(NOTIF_EVENT_ID, notif)
+        nm.notify(nid, notif)
+        // 5秒后自动清除
+        mainHandler.postDelayed({ nm.cancel(nid) }, 5000)
     }
 
     private fun syncClipIntent(): PendingIntent =
@@ -621,7 +619,7 @@ class ClipSyncService : Service() {
         NotificationCompat.Builder(this, NOTIF_CHANNEL)
             .setContentTitle("clipd")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_menu_share)
+            .setSmallIcon(R.drawable.ic_notif)
             .setOngoing(true)
             .setContentIntent(launchIntent())
             .addAction(android.R.drawable.ic_menu_upload, "同步剪切板", syncClipIntent())
@@ -631,21 +629,6 @@ class ClipSyncService : Service() {
         getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(text))
 
     private fun handleSyncClipAction() {
-        val cm = clipboardManager ?: return
-        try {
-            val clip = cm.primaryClip
-            if (clip == null || clip.itemCount == 0) {
-                Sync.log("⚠ 无法读取剪切板")
-                return
-            }
-            val text = clip.getItemAt(0)?.text?.toString()
-            if (!text.isNullOrBlank()) {
-                Sync.sendText(text)
-            } else {
-                Sync.log("剪切板无文字内容")
-            }
-        } catch (e: Exception) {
-            Sync.log("⚠ 读取剪切板失败: ${e.message}")
-        }
+        readWithTempFocusableOverlay()
     }
 }
