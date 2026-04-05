@@ -180,6 +180,35 @@ class MainActivity : AppCompatActivity() {
         syncServiceState()
         updateAccessibilityStatus()
         updateNotifListenerStatus()
+        checkPromotedNotifPermission()
+    }
+
+    @Suppress("NewApi")
+    private fun checkPromotedNotifPermission() {
+        if (Build.VERSION.SDK_INT < 36) return
+        val nm = getSystemService(android.app.NotificationManager::class.java)
+        if (!nm.canPostPromotedNotifications()) {
+            val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+            if (!prefs.getBoolean("promoted_notif_asked", false)) {
+                prefs.edit().putBoolean("promoted_notif_asked", true).apply()
+                AlertDialog.Builder(this)
+                    .setTitle("开启原子通知")
+                    .setMessage("允许 clipd 显示实时活动通知（原子岛/灵动岛），在状态栏显示同步状态")
+                    .setPositiveButton("去设置") { _, _ ->
+                        try {
+                            startActivity(Intent("android.settings.APP_NOTIFICATION_PROMOTION_SETTINGS").apply {
+                                putExtra("android.provider.extra.APP_PACKAGE", packageName)
+                            })
+                        } catch (_: Exception) {
+                            startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                            })
+                        }
+                    }
+                    .setNegativeButton("跳过", null)
+                    .show()
+            }
+        }
     }
 
     @Suppress("DEPRECATION")

@@ -139,11 +139,20 @@ class ClipSyncService : Service() {
      * 临时添加一个可获焦的 overlay，读取剪切板后立即移除。
      * 参考 MacroDroid/Tasker 的 "Clipboard Refresh" 实现。
      */
+    private var readAttempt = 0
+    private val MAX_READ_ATTEMPTS = 4
+    // 每轮间隔：立即、1.5s、3s、5s（越来越长，给 app 切换机会）
+    private val RETRY_DELAYS = longArrayOf(0, 1500, 3000, 5000)
+
     private fun readWithTempFocusableOverlay() {
-        if (!android.provider.Settings.canDrawOverlays(this)) {
-            Sync.log("⚠ 无悬浮窗权限，无法临时获焦读取")
-            return
-        }
+        readAttempt = 0
+        doSingleOverlayRead()
+    }
+
+    private fun doSingleOverlayRead() {
+        if (readAttempt >= MAX_READ_ATTEMPTS) return
+        if (!android.provider.Settings.canDrawOverlays(this)) return
+
         val wm = getSystemService(WINDOW_SERVICE) as android.view.WindowManager
         val tempView = android.view.View(this).apply {
             setBackgroundColor(android.graphics.Color.TRANSPARENT)
@@ -160,15 +169,21 @@ class ClipSyncService : Service() {
 
         try {
             wm.addView(tempView, params)
-        } catch (e: Exception) {
-            Sync.log("⚠ 临时 overlay 创建失败: ${e.message}")
-            return
+        } catch (e: Exception) { return }
+
+        var removed = false
+        fun removeOverlay() {
+            if (!removed) {
+                removed = true
+                try { wm.removeView(tempView) } catch (_: Exception) {}
+            }
         }
 
-        // 多次延迟读取，读完后移除
-        val delays = longArrayOf(50, 150, 400, 800)
+        var found = false
+        val delays = longArrayOf(50, 200, 400)
         for (delay in delays) {
             mainHandler.postDelayed({
+                if (removed || found) return@postDelayed
                 try {
                     val clip = clipboardManager?.primaryClip
                     if (clip != null && clip.itemCount > 0) {
@@ -177,20 +192,31 @@ class ClipSyncService : Service() {
                             val hash = text.hashCode().toString()
                             if (hash != lastClipHash && hash != Sync.lastSentHash) {
                                 lastClipHash = hash
+                                found = true
                                 Sync.log("📤 剪切板已捕获: ${text.take(40)}")
                                 Sync.sendText(text)
                                 sendEventNotification("剪切板已同步", "→ ${text.take(60)}")
+                            } else {
+                                found = true  // 内容相同，不重复发
                             }
+                            removeOverlay()
                         }
                     }
                 } catch (_: Exception) {}
             }, delay)
         }
 
-        // 最迟 1 秒后移除临时 overlay，归还焦点
+        // 500ms 后移除本轮 overlay，未读到则安排下一轮
         mainHandler.postDelayed({
-            try { wm.removeView(tempView) } catch (_: Exception) {}
-        }, 1000)
+            removeOverlay()
+            if (!found) {
+                readAttempt++
+                if (readAttempt < MAX_READ_ATTEMPTS) {
+                    val nextDelay = RETRY_DELAYS[readAttempt]
+                    mainHandler.postDelayed({ doSingleOverlayRead() }, nextDelay)
+                }
+            }
+        }, 500)
     }
 
     private fun addOverlay() {
@@ -590,12 +616,14 @@ class ClipSyncService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
     private var eventNotifCounter = 0
+    private val NOTIF_LIVE_ID = 100  // 原子岛专用 ID
 
     private fun sendEventNotification(title: String, text: String) {
         val nm = getSystemService(NotificationManager::class.java)
-        // 每次用不同 ID，避免 setOnlyAlertOnce 效果 + Android 16 首次不弹的 bug
+
+        // 1) Heads-up 横幅通知（立即可见）
         val nid = NOTIF_EVENT_ID + (eventNotifCounter++ % 5)
-        val notif = NotificationCompat.Builder(this, NOTIF_EVENT_CHANNEL)
+        val headsUp = NotificationCompat.Builder(this, NOTIF_EVENT_CHANNEL)
             .setContentTitle(title)
             .setContentText(text)
             .setSmallIcon(R.drawable.ic_notif)
@@ -605,9 +633,41 @@ class ClipSyncService : Service() {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
             .build()
-        nm.notify(nid, notif)
-        // 5秒后自动清除
+        nm.notify(nid, headsUp)
         mainHandler.postDelayed({ nm.cancel(nid) }, 5000)
+
+        // 2) 原子岛 / Live Update 通知（Android 16+）
+        if (android.os.Build.VERSION.SDK_INT >= 36) {
+            postLiveUpdate(nm, title, text)
+        }
+    }
+
+    @Suppress("NewApi")
+    private fun postLiveUpdate(nm: NotificationManager, title: String, text: String) {
+        val chip = if (text.startsWith("→")) "已同步" else if (text.startsWith("←")) "已接收" else title.take(4)
+        val builder = NotificationCompat.Builder(this, NOTIF_CHANNEL)
+            .setSmallIcon(R.drawable.ic_notif)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setContentIntent(launchIntent())
+            .setOngoing(true)
+            .setSilent(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+
+        // 手动注入 promoted ongoing extras（无需 core 1.17.0）
+        builder.addExtras(android.os.Bundle().apply {
+            putBoolean("android.requestPromotedOngoing", true)
+            putString("android.shortCriticalText", chip)
+        })
+
+        // 直接设 FLAG_PROMOTED_ONGOING
+        val notif = builder.build()
+        notif.flags = notif.flags or Notification.FLAG_PROMOTED_ONGOING
+
+        nm.notify(NOTIF_LIVE_ID, notif)
+        // 5秒后移除
+        mainHandler.postDelayed({ nm.cancel(NOTIF_LIVE_ID) }, 5000)
     }
 
     private fun syncClipIntent(): PendingIntent =
