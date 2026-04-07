@@ -61,10 +61,19 @@ class ClipSyncService : Service() {
     private var heartbeatRunnable: Runnable? = null
     private val heartbeatIntervalMs = 10_000L
 
+    private fun ensureNotifListenerBound() {
+        // vivo 等 OEM 会杀掉 NotificationListenerService 进程；周期性请求 rebind
+        try {
+            val cn = android.content.ComponentName(this, NotifListenerService::class.java)
+            android.service.notification.NotificationListenerService.requestRebind(cn)
+        } catch (_: Exception) {}
+    }
+
     private fun startHeartbeat() {
         stopHeartbeat()
         heartbeatRunnable = object : Runnable {
             override fun run() {
+                ensureNotifListenerBound()
                 Sync.executor.execute {
                     val ip = Sync.ubuntuIp
                     if (!ip.isNullOrBlank()) {
