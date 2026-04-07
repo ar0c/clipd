@@ -10,3 +10,6 @@ dist/deb/
 __pycache__/
 *.pyc
 .venv/
+
+artifacts/
+build/
