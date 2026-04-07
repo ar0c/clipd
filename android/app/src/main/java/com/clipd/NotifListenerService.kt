@@ -40,6 +40,12 @@ class NotifListenerService : NotificationListenerService() {
             return
         }
 
+        // 默认过滤系统应用通知（系统更新、电量、VPN 等）
+        if (isSystemPackage(pkg)) {
+            Sync.log("⏭ 系统通知默认不转发: $pkg")
+            return
+        }
+
         val selected = prefs.getStringSet(PREFS_KEY_PACKAGES, emptySet()) ?: emptySet()
         val mode = prefs.getString(PREFS_KEY_MODE, "exclude")
         val forward = if (mode == "exclude") pkg !in selected else pkg in selected
@@ -94,4 +100,16 @@ class NotifListenerService : NotificationListenerService() {
 
     private fun String.esc() = replace("\\", "\\\\").replace("\"", "\\\"")
         .replace("\n", "\\n").replace("\r", "")
+
+    /** 系统应用判定：FLAG_SYSTEM 或 FLAG_UPDATED_SYSTEM_APP，加上 vivo/android 系统包前缀兜底 */
+    private fun isSystemPackage(pkg: String): Boolean {
+        if (pkg == "android" || pkg.startsWith("com.android.") ||
+            pkg.startsWith("com.vivo.") || pkg.startsWith("com.bbk.") ||
+            pkg.startsWith("com.iqoo.")) return true
+        return try {
+            val ai = packageManager.getApplicationInfo(pkg, 0)
+            (ai.flags and (android.content.pm.ApplicationInfo.FLAG_SYSTEM or
+                android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0
+        } catch (_: Exception) { false }
+    }
 }

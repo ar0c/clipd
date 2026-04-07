@@ -116,6 +116,14 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // Edge-to-edge: 把状态栏 / 导航栏的 inset 转为根容器 padding，避免 UI 顶到状态栏下
+        val root = findViewById<android.view.View>(R.id.rootContainer)
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val sys = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            v.setPadding(sys.left, sys.top, sys.right, sys.bottom)
+            insets
+        }
+
         findViewById<TextView>(R.id.tvVersion).text =
             "剪切板同步 v${packageManager.getPackageInfo(packageName, 0).versionName}"
         tvStatus = findViewById(R.id.tvStatus)
@@ -227,14 +235,15 @@ class MainActivity : AppCompatActivity() {
         }
         if (!running) {
             val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
-            val startedOnce = prefs.getBoolean("started_once", false)
-            if (!startedOnce) {
-                // 首次使用，自动开始搜索
+            val manuallyStopped = prefs.getBoolean("manually_stopped", false)
+            // 只要 WiFi 可用且用户没有主动停止，就自动拉起同步
+            if (isWifiConnected() && !manuallyStopped) {
                 startSync()
                 return
             }
             val reason = when {
                 wasRunning -> "服务已停止（可能被系统回收）"
+                manuallyStopped -> "已手动停止 · 点击开始恢复同步"
                 else -> {
                     val savedIp = prefs.getString(KEY_IP, "")
                     if (savedIp.isNullOrBlank()) "或打开 Ubuntu 端扫描二维码配对"
@@ -691,7 +700,10 @@ class MainActivity : AppCompatActivity() {
         startForegroundService(Intent(this, ClipSyncService::class.java))
         isRunning = true
         btnToggle.text = "停止同步"
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("started_once", true).apply()
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putBoolean("started_once", true)
+            .putBoolean("manually_stopped", false)
+            .apply()
         if (!isWifiConnected()) {
             setState(AppState.NO_WIFI)
         } else {
@@ -711,7 +723,103 @@ class MainActivity : AppCompatActivity() {
         stopService(Intent(this, ClipSyncService::class.java))
         isRunning = false
         btnToggle.text = "开始同步"
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putBoolean("manually_stopped", true).apply()
         setState(AppState.STOPPED, "已手动停止")
+    }
+
+    // 本次进程内"跳过"标记 — 不持久化，下次冷启动会再次检查
+    private var skipBattOptThisRun = false
+    private var skipAutoStartThisRun = false
+
+    private fun promptBackgroundSurvival() {
+        if (skipBattOptThisRun) {
+            promptAutoStart()
+            return
+        }
+        val pm = runCatching { getSystemService(POWER_SERVICE) as android.os.PowerManager }.getOrNull()
+        val needBattOpt = pm != null && !pm.isIgnoringBatteryOptimizations(packageName)
+        if (!needBattOpt) {
+            promptAutoStart()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("加入电量优化白名单")
+            .setMessage("系统会在后台杀掉未加白的 app，导致 clipd 同步中断。\n下一步请点击「允许」。")
+            .setCancelable(false)
+            .setPositiveButton("去设置") { _, _ ->
+                @Suppress("BatteryLife")
+                val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                    .setData(android.net.Uri.parse("package:$packageName"))
+                runCatching { startActivity(intent) }
+                // onResume 会再次调用 promptBackgroundSurvival —— 没授成功会再问
+            }
+            .setNegativeButton("本次跳过") { _, _ ->
+                skipBattOptThisRun = true
+                promptAutoStart()
+            }
+            .show()
+    }
+
+    private fun promptAutoStart() {
+        if (skipAutoStartThisRun) return
+        // 自启动状态没有可用查询 API：用户明确点过"已设置"或"去设置"后就不再问
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        if (prefs.getBoolean("autostart_user_confirmed", false)) {
+            skipAutoStartThisRun = true
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("开启后台自启动（vivo/OPPO/MIUI）")
+            .setMessage("系统省电策略可能在锁屏后杀掉 clipd 后台服务。\n请在下一页找到 clipd，开启「允许自启动」/「后台运行」。\n如果已设置过，点「已设置」不再提示。")
+            .setCancelable(false)
+            .setPositiveButton("去设置") { _, _ ->
+                openAutoStartSettings()
+                skipAutoStartThisRun = true
+            }
+            .setNeutralButton("已设置") { _, _ ->
+                prefs.edit().putBoolean("autostart_user_confirmed", true).apply()
+                skipAutoStartThisRun = true
+            }
+            .setNegativeButton("本次跳过") { _, _ -> skipAutoStartThisRun = true }
+            .show()
+    }
+
+    private fun openAutoStartSettings() {
+        // 依次尝试各厂商自启动管理页面，失败回退到应用详情
+        val candidates = listOf(
+            // vivo
+            ComponentName("com.iqoo.secure",
+                "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager"),
+            ComponentName("com.iqoo.secure",
+                "com.iqoo.secure.safeguard.SoftPermissionDetailActivity"),
+            ComponentName("com.vivo.permissionmanager",
+                "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"),
+            // OPPO
+            ComponentName("com.coloros.safecenter",
+                "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
+            ComponentName("com.oppo.safe",
+                "com.oppo.safe.permission.startup.StartupAppListActivity"),
+            // Xiaomi
+            ComponentName("com.miui.securitycenter",
+                "com.miui.permcenter.autostart.AutoStartManagementActivity"),
+            // Huawei
+            ComponentName("com.huawei.systemmanager",
+                "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"),
+        )
+        for (cn in candidates) {
+            try {
+                startActivity(Intent().setComponent(cn).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                return
+            } catch (_: Exception) { /* 继续尝试下一个 */ }
+        }
+        // 全部失败：打开应用详情
+        try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(android.net.Uri.parse("package:$packageName")))
+        } catch (_: Exception) {
+            Toast.makeText(this, "未找到自启动设置页，请手动前往系统设置", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun requestRequiredPermissions() {
@@ -730,6 +838,9 @@ class MainActivity : AppCompatActivity() {
         }
         if (perms.isNotEmpty())
             ActivityCompat.requestPermissions(this, perms.toTypedArray(), 0)
+        // 串行化引导：电量优化 → 自启动 → 悬浮窗。
+        // 实时检查实际状态而非一次性 flag；只有"用户明确跳过"才在本次会话内不再弹。
+        promptBackgroundSurvival()
         // 悬浮窗权限（后台剪切板同步必需）
         if (!android.provider.Settings.canDrawOverlays(this)) {
             android.app.AlertDialog.Builder(this)

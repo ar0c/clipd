@@ -354,8 +354,13 @@ class ClipdWindow(Gtk.ApplicationWindow):
 
     def _on_clear_log(self, btn):
         self._log_lines.clear()
-        self._stats = {"sent": 0, "recv": 0, "notif": 0, "android_ip": None}
+        # 仅清统计计数，不清 android_ip（保持当前连接状态显示）
+        self._stats["sent"] = 0
+        self._stats["recv"] = 0
+        self._stats["notif"] = 0
         self.log_buf.set_text("")
+        # 重启 journal tail 并丢弃历史，避免管道里残留的旧行清空后再次涌出
+        GLib.idle_add(self._start_journal_tail, True)
 
     def _show_error(self, msg):
         dlg = Gtk.MessageDialog(
@@ -426,15 +431,16 @@ class ClipdWindow(Gtk.ApplicationWindow):
 
     # ── journalctl tail ──
 
-    def _start_journal_tail(self):
+    def _start_journal_tail(self, fresh=False):
         # 杀掉旧进程
         if self._journal_proc and self._journal_proc.poll() is None:
             self._journal_proc.kill()
 
+        n_arg = "0" if fresh else "200"
         try:
             self._journal_proc = subprocess.Popen(
                 ["journalctl", "--user", "-u", SERVICE_NAME,
-                 "-f", "-n", "200", "--no-hostname", "-o", "short-iso"],
+                 "-f", "-n", n_arg, "--no-hostname", "-o", "short-iso"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True,
             )
@@ -478,10 +484,11 @@ class ClipdWindow(Gtk.ApplicationWindow):
             GLib.idle_add(self._update_log_view)
 
     def _update_log_view(self):
-        self.log_buf.set_text("\n".join(self._log_lines))
-        # 滚动到底部
-        mark = self.log_buf.get_insert()
-        self.log_view.scroll_to_mark(mark, 0, True, 0, 1.0)
+        # 最新的在最上面
+        self.log_buf.set_text("\n".join(reversed(self._log_lines)))
+        # 滚动到顶
+        start = self.log_buf.get_start_iter()
+        self.log_view.scroll_to_iter(start, 0, True, 0, 0)
         return False
 
     def _append_log(self, msg):

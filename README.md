@@ -193,3 +193,34 @@ sudo apt remove clipd
 
 **飞书粘贴出来是乱码**
 - RustDesk 占用了 X11 剪贴板：RustDesk → 设置 → 安全 → 关闭「剪贴板共享」
+
+**vivo / OriginOS 通知图标显示为默认 Android 机器人**
+
+vivo OriginOS 5+ 有个隐藏白名单 `allow_notification_applist_v3`，只允许列表里的 app（系统应用 + 微信/QQ/飞书/网易等）使用自定义通知小图标，其他一律替换为系统默认 glyph。还有个 `statusbar_notification_icon_redraw` 决定是否重绘。
+
+`adb shell dumpsys notification` 能确认通知 icon 正确送达（`typ=BITMAP` 或 `typ=RESOURCE`），但状态栏仍显示默认图标，就是被 SystemUI 在渲染时替换了。
+
+**解决（需要连接 adb，一次性设置）**：
+
+```bash
+# 1. 查看当前白名单
+CUR=$(adb shell "settings get secure allow_notification_applist_v3" | tr -d '\r')
+echo "$CUR"
+
+# 2. 把 com.clipd 追加进去
+adb shell "settings put secure allow_notification_applist_v3 '${CUR}com.clipd;'"
+
+# 3. 关闭状态栏图标重绘（默认 0 = vivo 风格重绘为默认图标；1 = 保留 app 原图标）
+adb shell "settings put system statusbar_notification_icon_redraw 1"
+
+# 4. 重启 SystemUI 和 clipd 生效
+adb shell "am force-stop com.android.systemui"
+adb shell "am force-stop com.clipd"
+```
+
+下拉通知中心就能看到 clipd 的蓝色剪贴板图标了。
+
+**注意**：
+- 系统 OTA 升级可能重置这两个设置，届时重新执行即可
+- 对 OPPO ColorOS / 小米 MIUI 等同源方案可能也有类似隐藏白名单，关键词换成对应 ROM 的 secure setting 名
+- 正式发布场景的"合规"做法：接 vivo Push SDK 并在 dev.vivo.com.cn 注册，服务端自动加白（个人项目不现实）

@@ -27,10 +27,11 @@ import java.net.ServerSocket
 class ClipSyncService : Service() {
 
     companion object {
-        const val NOTIF_CHANNEL = "clipd_service"
-        const val NOTIF_EVENT_CHANNEL = "clipd_sync_alert"
+        const val NOTIF_CHANNEL = "clipd_service_v2"
+        const val NOTIF_EVENT_CHANNEL = "clipd_sync_alert_v2"
         const val NOTIF_ID = 1
         const val NOTIF_EVENT_ID = 2
+        const val GROUP_KEY = "clipd_fg"
         const val ACTION_STATUS = "com.clipd.STATUS"
         const val ACTION_SYNC_CLIP = "com.clipd.SYNC_CLIP"
 
@@ -194,11 +195,18 @@ class ClipSyncService : Service() {
         val params = android.view.WindowManager.LayoutParams(
             1, 1,
             android.view.WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            // 可聚焦但不抢 IME：FLAG_ALT_FOCUSABLE_IM 阻止 WM 把当前 IME 收起或附着到本窗口
+            android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM or
+                android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             android.graphics.PixelFormat.TRANSLUCENT
         ).apply {
             gravity = android.view.Gravity.START or android.view.Gravity.TOP
             x = 0; y = 0
+            // 显式告诉 WM：本窗口出现/消失都不要动 IME 状态
+            softInputMode =
+                android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_UNCHANGED or
+                android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
         }
 
         try {
@@ -633,8 +641,10 @@ class ClipSyncService : Service() {
             NotificationChannel(NOTIF_CHANNEL, "clipd 同步服务",
                 NotificationManager.IMPORTANCE_LOW).apply { description = "保持剪切板同步" }
         )
-        // 删除旧通道（importance 可能被缓存为低）
+        // 删除旧通道（vivo 可能缓存旧图标）
         nm.deleteNotificationChannel("clipd_events")
+        nm.deleteNotificationChannel("clipd_service")
+        nm.deleteNotificationChannel("clipd_sync_alert")
         nm.createNotificationChannel(
             NotificationChannel(NOTIF_EVENT_CHANNEL, "clipd 同步提醒",
                 NotificationManager.IMPORTANCE_HIGH).apply {
@@ -659,15 +669,20 @@ class ClipSyncService : Service() {
 
         // 1) Heads-up 横幅通知（立即可见）
         val nid = NOTIF_EVENT_ID + (eventNotifCounter++ % 5)
+        val bigIcon = buildLauncherBitmap()
         val headsUp = NotificationCompat.Builder(this, NOTIF_EVENT_CHANNEL)
             .setContentTitle(title)
             .setContentText(text)
-            .setSmallIcon(R.drawable.ic_notif)
+            .setSmallIcon(buildSmallIcon(bigIcon))
+            .setLargeIcon(bigIcon)
+            .setColor(0xFF4A90D9.toInt())
             .setContentIntent(launchIntent())
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
+            .setGroup(GROUP_KEY)
+            .setGroupSummary(false)
             .build()
         nm.notify(nid, headsUp)
         mainHandler.postDelayed({ nm.cancel(nid) }, 5000)
@@ -681,8 +696,13 @@ class ClipSyncService : Service() {
     @Suppress("NewApi")
     private fun postLiveUpdate(nm: NotificationManager, title: String, text: String) {
         val chip = if (text.startsWith("→")) "已同步" else if (text.startsWith("←")) "已接收" else title.take(4)
+        val liveBmp = buildLauncherBitmap()
         val builder = NotificationCompat.Builder(this, NOTIF_CHANNEL)
-            .setSmallIcon(R.drawable.ic_notif)
+            .setSmallIcon(buildSmallIcon(liveBmp))
+            .setLargeIcon(liveBmp)
+            .setColor(0xFF4A90D9.toInt())
+            .setGroup(GROUP_KEY)
+            .setGroupSummary(false)
             .setContentTitle(title)
             .setContentText(text)
             .setContentIntent(launchIntent())
@@ -711,15 +731,35 @@ class ClipSyncService : Service() {
             Intent(this, ClipSyncService::class.java).setAction(ACTION_SYNC_CLIP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-    private fun buildNotification(text: String): Notification =
-        NotificationCompat.Builder(this, NOTIF_CHANNEL)
+    private fun buildLauncherBitmap(size: Int = 96): android.graphics.Bitmap? = try {
+        val dr = androidx.appcompat.content.res.AppCompatResources.getDrawable(this, R.mipmap.ic_launcher)
+        if (dr != null) {
+            val b = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
+            dr.setBounds(0, 0, size, size); dr.draw(android.graphics.Canvas(b)); b
+        } else null
+    } catch (_: Exception) { null }
+
+    private fun buildSmallIcon(bmp: android.graphics.Bitmap?): androidx.core.graphics.drawable.IconCompat =
+        if (bmp != null) androidx.core.graphics.drawable.IconCompat.createWithBitmap(bmp)
+        else androidx.core.graphics.drawable.IconCompat.createWithResource(this, R.drawable.ic_notif)
+
+    private fun buildNotification(text: String): Notification {
+        val largeIcon = buildLauncherBitmap()
+        val smallIcon = buildSmallIcon(largeIcon)
+        return NotificationCompat.Builder(this, NOTIF_CHANNEL)
             .setContentTitle("clipd")
             .setContentText(text)
-            .setSmallIcon(R.drawable.ic_notif)
+            .setSmallIcon(smallIcon)
+            .setLargeIcon(largeIcon)
+            .setColor(0xFF4A90D9.toInt())
             .setOngoing(true)
             .setContentIntent(launchIntent())
+            // 前台通知本身就是 group summary，避免双通知 + 折叠时丢失实时状态
+            .setGroup(GROUP_KEY)
+            .setGroupSummary(true)
             .addAction(android.R.drawable.ic_menu_upload, "同步剪切板", syncClipIntent())
             .build()
+    }
 
     private fun updateNotification(text: String) =
         getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(text))

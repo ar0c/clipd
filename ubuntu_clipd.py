@@ -720,6 +720,26 @@ def _do_push():
         print(f"[clipd] push error: {e}", flush=True)
 
 
+def watch_wayland_clipboard():
+    """Wayland 原生剪贴板监听：wl-paste --watch 每次 selection 变化触发回调。"""
+    import shutil
+    if not shutil.which("wl-paste"):
+        print("[clipd] 未安装 wl-clipboard，Wayland 监听跳过", flush=True)
+        return
+    print("[clipd] Wayland 剪贴板监听已启动 (wl-paste --watch)", flush=True)
+    # 用 sh -c 运行内联命令，wl-paste 会在 selection 改变时调用一次 sh -c "..."
+    try:
+        proc = subprocess.Popen(
+            ["wl-paste", "--watch", "sh", "-c", "echo CLIP_CHANGED"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        for line in proc.stdout:
+            if "CLIP_CHANGED" in line and _push_executor is not None:
+                _push_executor.submit(_do_push)
+    except Exception as e:
+        print(f"[clipd] wl-paste --watch 失败: {e}", flush=True)
+
+
 def watch_and_push():
     """X11 XFixes SelectionNotify 事件驱动监听，不读内容、不干扰输入法"""
     import ctypes, ctypes.util
@@ -841,6 +861,8 @@ if __name__ == "__main__":
         max_workers=4, thread_name_prefix="clipd-push"
     )
     threading.Thread(target=watch_and_push, daemon=True).start()
+    if _is_wayland():
+        threading.Thread(target=watch_wayland_clipboard, daemon=True).start()
 
     socketserver.ThreadingTCPServer.allow_reuse_address = True
     with socketserver.ThreadingTCPServer(("0.0.0.0", UBUNTU_PORT), ClipHandler) as httpd:
