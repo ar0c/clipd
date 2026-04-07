@@ -31,6 +31,10 @@
         android:usesCleartextTraffic="true"
         android:theme="@style/Theme.AppCompat.Light.NoActionBar">
 
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode_ui" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -45,6 +49,13 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="clipd" android:host="connect" />
+            </intent-filter>
+            <!-- 接收系统分享（任意文件 → clipd → 发送到桌面）-->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
 

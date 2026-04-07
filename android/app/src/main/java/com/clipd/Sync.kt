@@ -141,6 +141,70 @@ object Sync {
         }
     }
 
+    /** 将 content:// URI 指向的任意文件流式上传到桌面 /file 端点 */
+    fun sendFile(ctx: Context, uri: android.net.Uri, onResult: (Boolean, String) -> Unit) {
+        val ip = resolveIp() ?: run {
+            log("⏭ sendFile 跳过: ubuntuIp 为空")
+            onResult(false, "未连接到桌面")
+            return
+        }
+        executor.execute {
+            var conn: HttpURLConnection? = null
+            try {
+                val resolver = ctx.contentResolver
+                // 获取原始文件名 + 大小
+                var displayName = "clipd_file"
+                var size: Long = -1
+                resolver.query(uri, null, null, null, null)?.use { c ->
+                    if (c.moveToFirst()) {
+                        val ni = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                        val si = c.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                        if (ni >= 0) c.getString(ni)?.let { displayName = it }
+                        if (si >= 0) size = c.getLong(si)
+                    }
+                }
+                if (size < 0) {
+                    // 回退：从输入流计算
+                    resolver.openInputStream(uri)?.use { input ->
+                        var n = 0L
+                        val tmp = ByteArray(8192)
+                        while (true) {
+                            val r = input.read(tmp); if (r <= 0) break; n += r
+                        }
+                        size = n
+                    }
+                }
+                if (size <= 0) { onResult(false, "文件为空"); return@execute }
+
+                val url = URL("http://$ip:$UBUNTU_HTTP_PORT/file")
+                conn = (url.openConnection() as HttpURLConnection).apply {
+                    requestMethod = "POST"
+                    doOutput = true
+                    connectTimeout = 5000
+                    readTimeout = 60000
+                    setFixedLengthStreamingMode(size)
+                    setRequestProperty("Content-Type", "application/octet-stream")
+                    setRequestProperty("X-Filename", URLEncoder.encode(displayName, "UTF-8"))
+                }
+                resolver.openInputStream(uri)?.use { input ->
+                    conn.outputStream.use { out -> input.copyTo(out, 64 * 1024) }
+                } ?: run { onResult(false, "无法打开文件"); return@execute }
+                val code = conn.responseCode
+                val ok = code in 200..299
+                log(if (ok) "→ Ubuntu 文件 $displayName (${size/1024}KB)"
+                    else "✗ 发送文件失败: HTTP $code")
+                if (ok) onSendSuccess() else onSendFailure()
+                onResult(ok, if (ok) "已发送: $displayName" else "HTTP $code")
+            } catch (e: Exception) {
+                onSendFailure()
+                log("✗ 发送文件失败: ${e.message}")
+                onResult(false, e.message ?: "发送失败")
+            } finally {
+                conn?.disconnect()
+            }
+        }
+    }
+
     fun sendImage(file: File) {
         val ip = resolveIp() ?: run { log("⏭ sendImage 跳过: ubuntuIp 为空"); return }
         executor.execute {

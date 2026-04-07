@@ -129,6 +129,8 @@ class MainActivity : AppCompatActivity() {
         tvLogBadge = findViewById(R.id.tvLogBadge)
         findViewById<Button>(R.id.btnShowLog).setOnClickListener { showLogSheet() }
         findViewById<Button>(R.id.btnSettings).setOnClickListener { showSettingsDialog() }
+        findViewById<Button>(R.id.btnScanQr).setOnClickListener { startQrScan() }
+        findViewById<Button>(R.id.btnSendFile).setOnClickListener { pickAndSendFile() }
 
         tvNotifStatus = findViewById(R.id.tvNotifStatus)
         btnNotifAccess = findViewById(R.id.btnNotifAccess)
@@ -153,6 +155,8 @@ class MainActivity : AppCompatActivity() {
 
         // 处理 QR 码深链接: clipd://connect?ip=x.x.x.x&port=8888
         handleDeepLink(intent)
+        // 处理从其他 app 分享的文件（系统分享菜单 → clipd）
+        handleShareIntent(intent)
 
         btnToggle.setOnClickListener {
             if (isRunning) stopSync() else startSync()
@@ -263,6 +267,7 @@ class MainActivity : AppCompatActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleDeepLink(intent)
+        handleShareIntent(intent)
     }
 
     private fun showLogSheet() {
@@ -320,14 +325,123 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleDeepLink(intent: Intent) {
         val uri = intent.data ?: return
-        if (uri.scheme == "clipd" && uri.host == "connect") {
-            val ip = uri.getQueryParameter("ip") ?: return
-            if (ip.isNotBlank()) {
-                Sync.saveUbuntuIp(this, ip)
-                Sync.log("通过二维码配对: $ip")
-                Toast.makeText(this, "已配对: $ip", Toast.LENGTH_SHORT).show()
-                if (isRunning) setState(AppState.SEARCHING, ip)
+        applyPairingUri(uri.toString())
+    }
+
+    private fun applyPairingUri(raw: String): Boolean {
+        val uri = try { android.net.Uri.parse(raw) } catch (_: Exception) { return false }
+        if (uri.scheme != "clipd" || uri.host != "connect") {
+            Toast.makeText(this, "无效的配对二维码", Toast.LENGTH_SHORT).show()
+            return false
+        }
+        val ip = uri.getQueryParameter("ip")?.trim().orEmpty()
+        if (ip.isBlank()) {
+            Toast.makeText(this, "二维码缺少 IP", Toast.LENGTH_SHORT).show()
+            return false
+        }
+        Sync.saveUbuntuIp(this, ip)
+        Sync.log("通过二维码配对: $ip")
+        Toast.makeText(this, "已配对: $ip", Toast.LENGTH_SHORT).show()
+        // 主动 ping 一次：桌面端 /ping 处理器会从 client_address 学习手机 IP
+        Sync.executor.execute { Sync.isClipdServerPublic(ip) }
+        if (!isRunning) startSync() else verifyAndConnect(ip)
+        return true
+    }
+
+    private val pickFileLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.GetMultipleContents()
+    ) { uris: List<android.net.Uri> ->
+        if (uris.isNotEmpty()) sendFileUris(uris)
+    }
+
+    private fun pickAndSendFile() {
+        if (Sync.ubuntuIp.isNullOrBlank()) {
+            Toast.makeText(this, "尚未连接到桌面", Toast.LENGTH_SHORT).show()
+            return
+        }
+        try {
+            pickFileLauncher.launch("*/*")
+        } catch (e: Exception) {
+            Toast.makeText(this, "无法打开文件选择器: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun sendFileUris(uris: List<android.net.Uri>) {
+        val total = uris.size
+        Toast.makeText(this, "开始发送 $total 个文件", Toast.LENGTH_SHORT).show()
+        Thread {
+            var ok = 0
+            var fail = 0
+            for ((idx, uri) in uris.withIndex()) {
+                val latch = java.util.concurrent.CountDownLatch(1)
+                Sync.sendFile(applicationContext, uri) { success, msg ->
+                    if (success) ok++ else fail++
+                    runOnUiThread {
+                        Toast.makeText(
+                            this,
+                            "(${idx + 1}/$total) $msg",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    latch.countDown()
+                }
+                latch.await(10, java.util.concurrent.TimeUnit.MINUTES)
             }
+            runOnUiThread {
+                Toast.makeText(
+                    this,
+                    "发送完成: 成功 $ok / 失败 $fail",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }.start()
+    }
+
+    private fun handleShareIntent(intent: Intent): Boolean {
+        when (intent.action) {
+            Intent.ACTION_SEND -> {
+                val uri = if (Build.VERSION.SDK_INT >= 33) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+                } ?: return false
+                sendFileUris(listOf(uri))
+                return true
+            }
+            Intent.ACTION_SEND_MULTIPLE -> {
+                val uris: List<android.net.Uri> = if (Build.VERSION.SDK_INT >= 33) {
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, android.net.Uri::class.java)
+                        ?: return false
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableArrayListExtra<android.net.Uri>(Intent.EXTRA_STREAM)
+                        ?: return false
+                }
+                if (uris.isNotEmpty()) { sendFileUris(uris); return true }
+                return false
+            }
+            else -> return false
+        }
+    }
+
+    private fun startQrScan() {
+        try {
+            val options = com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions.Builder()
+                .setBarcodeFormats(com.google.mlkit.vision.barcode.common.Barcode.FORMAT_QR_CODE)
+                .build()
+            val scanner = com.google.mlkit.vision.codescanner.GmsBarcodeScanning.getClient(this, options)
+            scanner.startScan()
+                .addOnSuccessListener { barcode ->
+                    val raw = barcode.rawValue ?: return@addOnSuccessListener
+                    applyPairingUri(raw)
+                }
+                .addOnFailureListener { e ->
+                    Toast.makeText(this, "扫码失败: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+                .addOnCanceledListener { /* 用户取消 */ }
+        } catch (e: Throwable) {
+            Toast.makeText(this, "扫码不可用: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 

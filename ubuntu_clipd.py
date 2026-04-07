@@ -33,8 +33,10 @@ _notify_inited  = False
 
 _last_hash     = ""
 _lock          = threading.Lock()
-_android_ip    = None
-_android_lock  = threading.Lock()
+_android_ip         = None
+_android_lock       = threading.Lock()
+_android_last_seen  = 0.0
+ANDROID_TIMEOUT_SEC = 20
 _wl_copy_proc  = None
 _wl_copy_lock  = threading.Lock()
 _tray_icon     = None
@@ -475,10 +477,13 @@ def scan_for_android():
         candidates += [f"192.168.{c}.{h}" for c in range(0, 21) for h in range(1, 255)]
     if a != "10":
         candidates += [f"10.0.{c}.{h}" for c in range(0, 6) for h in range(1, 255)]
-    # 172.16-31 只扫 /24（不扫全段，避免过慢）
+    # 172.16-31: 覆盖常见第三段（避免硬编码 my_c 导致跨子网失败）
     if a != "172":
-        candidates += [f"172.{b2}.{my_c}.{h}"
-                       for b2 in range(16, 33) for h in range(1, 255)]
+        common_thirds = sorted(set(range(0, 11)) | {my_c, 32})
+        candidates += [f"172.{b2}.{c}.{h}"
+                       for b2 in range(16, 32)
+                       for c in common_thirds
+                       for h in range(1, 255)]
 
     print(f"[clipd] 子网扫描 {len(candidates)} 个候选...", flush=True)
     with concurrent.futures.ThreadPoolExecutor(max_workers=128) as pool:
@@ -519,12 +524,85 @@ def send_to_android(data: bytes | str, is_image: bool = False):
 # ── HTTP 服务器（接收来自 Android）────────────────────────────────────────────
 
 class ClipHandler(http.server.BaseHTTPRequestHandler):
+    def _learn_android_from_request(self):
+        """任何请求进来时从 client_address 学习 Android IP 并刷新心跳时间戳。"""
+        try:
+            ip = self.client_address[0]
+            if not ip or ip.startswith("127."):
+                return
+            global _android_ip, _android_last_seen
+            with _android_lock:
+                _android_last_seen = time.time()
+                if _android_ip != ip:
+                    _android_ip = ip
+                    print(f"[clipd] Android 反向发现: {ip}", flush=True)
+                    _add_log(f"Android 已连接: {ip}")
+                    try:
+                        notify(f"Android 已连接: {ip}")
+                        update_tray(True, f"已连接 Android: {ip}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     def do_POST(self):
+        self._learn_android_from_request()
         path = self.path.split("?")[0]
         if path == "/notify":
             self._handle_notify()
+        elif path == "/file":
+            self._handle_file()
         else:
             self._handle_clipboard()
+
+    def _handle_file(self):
+        """接收 Android 上传的任意文件（流式写入）。
+        协议：POST /file, Content-Length: N, X-Filename: <urlencoded utf-8 原始名>，
+        body 即文件原始字节。"""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            if length <= 0:
+                self.send_response(411); self.end_headers(); return
+            raw_name = self.headers.get("X-Filename", "clipd_file")
+            filename = urllib.parse.unquote(raw_name, errors="replace")
+            filename = os.path.basename(filename).strip().replace("/", "_") or "clipd_file"
+            dest_dir = os.path.expanduser("~/Downloads/clipd")
+            os.makedirs(dest_dir, exist_ok=True)
+            base, ext = os.path.splitext(filename)
+            dest = os.path.join(dest_dir, filename)
+            i = 1
+            while os.path.exists(dest):
+                dest = os.path.join(dest_dir, f"{base} ({i}){ext}")
+                i += 1
+            remaining = length
+            with open(dest, "wb") as f:
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1 << 16, remaining))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    remaining -= len(chunk)
+            size_kb = length // 1024
+            print(f"[clipd] ← Android: 文件 {filename} ({size_kb}KB) → {dest}", flush=True)
+            _add_log(f"← Android: 文件 {filename} {size_kb}KB")
+            _stats["recv"] += 1
+            try:
+                _send_notification("文件已接收 ← Android",
+                                   f"{filename}\n{dest}",
+                                   icon="document-save", expire_time=6000)
+            except Exception:
+                pass
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+        except Exception as e:
+            _add_log(f"文件接收失败: {e}")
+            try:
+                self.send_response(500); self.end_headers()
+                self.wfile.write(str(e).encode("utf-8", errors="replace"))
+            except Exception:
+                pass
 
     def _handle_notify(self):
         import json
@@ -593,15 +671,7 @@ class ClipHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/ping":
-            # Android 扫描时调 /ping，顺便让 Ubuntu 学到 Android 的 IP
-            android_ip = self.client_address[0]
-            global _android_ip
-            with _android_lock:
-                if _android_ip != android_ip:
-                    _android_ip = android_ip
-                    print(f"[clipd] Android 反向发现: {android_ip}", flush=True)
-                    notify(f"Android 已连接: {android_ip}")
-                    update_tray(True, f"已连接 Android: {android_ip}")
+            self._learn_android_from_request()
             body = b"CLIPD_OK"
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
@@ -714,6 +784,31 @@ def watch_and_push():
         _push_executor.submit(_do_push)
 
 
+def _watchdog_android():
+    """心跳超时检测：超过 ANDROID_TIMEOUT_SEC 无请求则判定离线。"""
+    global _android_ip, _android_last_seen
+    while True:
+        time.sleep(5)
+        try:
+            with _android_lock:
+                ip = _android_ip
+                last = _android_last_seen
+            if ip and last and (time.time() - last) > ANDROID_TIMEOUT_SEC:
+                with _android_lock:
+                    if _android_ip == ip:
+                        _android_ip = None
+                        _android_last_seen = 0.0
+                print(f"[clipd] Android 离线: {ip}", flush=True)
+                _add_log(f"Android 离线: {ip}")
+                try:
+                    notify(f"Android 已断开: {ip}")
+                    update_tray(False, "等待 Android 连接...")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -736,6 +831,7 @@ if __name__ == "__main__":
             if not already:
                 threading.Thread(target=scan_for_android, daemon=True).start()
         threading.Thread(target=_delayed_scan, daemon=True).start()
+        threading.Thread(target=_watchdog_android, daemon=True).start()
 
     lan_ip = get_lan_ip()
     _add_log(f"本机 IP: {lan_ip}:{UBUNTU_PORT}")

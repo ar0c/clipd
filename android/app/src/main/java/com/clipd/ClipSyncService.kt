@@ -57,6 +57,40 @@ class ClipSyncService : Service() {
 
     private var clipPollRunnable: Runnable? = null
     private var clipReadReceiver: android.content.BroadcastReceiver? = null
+    private var heartbeatRunnable: Runnable? = null
+    private val heartbeatIntervalMs = 10_000L
+
+    private fun startHeartbeat() {
+        stopHeartbeat()
+        heartbeatRunnable = object : Runnable {
+            override fun run() {
+                Sync.executor.execute {
+                    val ip = Sync.ubuntuIp
+                    if (!ip.isNullOrBlank()) {
+                        // 正常心跳：ping 在线的桌面
+                        if (!runCatching { Sync.isClipdServerPublic(ip) }.getOrDefault(false)) {
+                            Sync.log("⚠ 心跳失败: $ip 不可达")
+                            Sync.ubuntuIp = null
+                        }
+                    } else if (isWifiConnected()) {
+                        // 断链恢复：重验保存的 IP，成功则自动重连
+                        val saved = Sync.getSavedUbuntuIp(this@ClipSyncService)
+                        if (!saved.isNullOrBlank() &&
+                            runCatching { Sync.isClipdServerPublic(saved) }.getOrDefault(false)) {
+                            Sync.log("心跳重连成功: $saved")
+                            mainHandler.post { onDiscovered(saved) }
+                        }
+                    }
+                }
+                mainHandler.postDelayed(this, heartbeatIntervalMs)
+            }
+        }.also { mainHandler.postDelayed(it, heartbeatIntervalMs) }
+    }
+
+    private fun stopHeartbeat() {
+        heartbeatRunnable?.let { mainHandler.removeCallbacks(it) }
+        heartbeatRunnable = null
+    }
 
     private fun registerClipboardListener() {
         clipboardManager = getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager
@@ -354,6 +388,7 @@ class ClipSyncService : Service() {
         startReceiveServer()
         registerScreenshotObserver()
         registerClipboardListener()
+        startHeartbeat()
         Log.i(Sync.TAG, "ClipSyncService started")
     }
 
@@ -364,6 +399,7 @@ class ClipSyncService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
+        stopHeartbeat()
         clipPollRunnable?.let { mainHandler.removeCallbacks(it) }
         clipboardManager?.removePrimaryClipChangedListener(clipListener)
         removeOverlay()

@@ -199,9 +199,14 @@ class ClipdWindow(Gtk.ApplicationWindow):
         self.btn_restart.get_style_context().add_class("svc-btn")
         self.btn_restart.connect("clicked", self._on_restart)
 
+        self.btn_qr = Gtk.Button(label="配对码")
+        self.btn_qr.get_style_context().add_class("svc-btn")
+        self.btn_qr.connect("clicked", self._on_show_qr)
+
         svc_box.pack_end(self.btn_stop, False, False, 0)
         svc_box.pack_end(self.btn_restart, False, False, 0)
         svc_box.pack_end(self.btn_start, False, False, 0)
+        svc_box.pack_end(self.btn_qr, False, False, 0)
         vbox.pack_start(svc_box, False, False, 0)
 
         # ── 开机自启 ──
@@ -315,6 +320,37 @@ class ClipdWindow(Gtk.ApplicationWindow):
             target=lambda: _systemctl(action, SERVICE_NAME),
             daemon=True,
         ).start()
+
+    def _on_show_qr(self, btn):
+        try:
+            import qrcode, tempfile
+            ip = get_lan_ip()
+            content = f"clipd://connect?ip={ip}&port={UBUNTU_PORT}"
+            img = qrcode.make(content)
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False, prefix="clipd_qr_")
+            img.save(tmp.name)
+            tmp.close()
+
+            dlg = Gtk.Dialog(title=f"配对码 — {ip}:{UBUNTU_PORT}",
+                             transient_for=self, modal=True)
+            dlg.add_button("关闭", Gtk.ResponseType.CLOSE)
+            box = dlg.get_content_area()
+            box.set_spacing(8)
+            box.set_margin_top(12); box.set_margin_bottom(12)
+            box.set_margin_start(12); box.set_margin_end(12)
+            image = Gtk.Image.new_from_file(tmp.name)
+            box.pack_start(image, True, True, 0)
+            tip = Gtk.Label(label="在手机 clipd 点右上角 ⌖ 扫码配对")
+            box.pack_start(tip, False, False, 0)
+            dlg.show_all()
+            dlg.run()
+            dlg.destroy()
+            try: os.unlink(tmp.name)
+            except Exception: pass
+        except ImportError:
+            self._show_error("需要安装 qrcode: pip3 install 'qrcode[pil]'")
+        except Exception as e:
+            self._show_error(f"生成二维码失败: {e}")
 
     def _on_clear_log(self, btn):
         self._log_lines.clear()
@@ -432,9 +468,12 @@ class ClipdWindow(Gtk.ApplicationWindow):
                 self._stats["recv"] += 1
             elif "← 通知:" in line or "Android 通知:" in line:
                 self._stats["notif"] += 1
-            ip_m = re.search(r'Android.*?(\d+\.\d+\.\d+\.\d+)', line)
-            if ip_m and "反向通知失败" not in line:
-                self._stats["android_ip"] = ip_m.group(1)
+            if "Android 离线" in line or "Android 已断开" in line:
+                self._stats["android_ip"] = None
+            else:
+                ip_m = re.search(r'Android.*?(\d+\.\d+\.\d+\.\d+)', line)
+                if ip_m and "反向通知失败" not in line:
+                    self._stats["android_ip"] = ip_m.group(1)
 
             GLib.idle_add(self._update_log_view)
 
