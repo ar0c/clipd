@@ -207,6 +207,10 @@ class ClipSyncService : Service() {
     private val RETRY_DELAYS = longArrayOf(0, 1500, 3000, 5000)
 
     private fun readWithTempFocusableOverlay() {
+        // 无 WiFi 或未连接到 Ubuntu 时不触发悬浮窗/读取，省电并避免 IME 闪烁
+        if (!isWifiConnected() || Sync.ubuntuIp.isNullOrBlank()) {
+            return
+        }
         readAttempt = 0
         doSingleOverlayRead()
     }
@@ -334,11 +338,19 @@ class ClipSyncService : Service() {
                 if (!savedIp.isNullOrBlank()) {
                     Sync.log("WiFi 已连接，验证 $savedIp ...")
                     Sync.executor.execute {
-                        if (Sync.isClipdServerPublic(savedIp)) {
+                        // 带退避的重试：0s / 2s / 5s / 10s，覆盖 WiFi 刚就绪但路由未完全建立的窗口
+                        val delays = longArrayOf(0, 2000, 5000, 10000)
+                        var ok = false
+                        for (d in delays) {
+                            if (d > 0) Thread.sleep(d)
+                            if (!isWifiConnected()) break
+                            if (Sync.isClipdServerPublic(savedIp)) { ok = true; break }
+                        }
+                        if (ok) {
                             Sync.saveUbuntuIp(this@ClipSyncService, savedIp)
-                            onDiscovered(savedIp)
+                            mainHandler.post { onDiscovered(savedIp) }
                         } else {
-                            Sync.log("$savedIp 不可达，开始搜索...")
+                            Sync.log("$savedIp 多次验证不可达，开始搜索...")
                             mainHandler.post { startDiscovery() }
                         }
                     }
@@ -465,6 +477,7 @@ class ClipSyncService : Service() {
     }
 
     private fun handleNewImage(uri: Uri) {
+        if (!isWifiConnected() || Sync.ubuntuIp.isNullOrBlank()) return
         val projection = arrayOf(MediaStore.Images.Media.DATA)
         contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
             if (!cursor.moveToFirst()) return
