@@ -48,6 +48,11 @@ class ClipboardIMEService : InputMethodService() {
 
     private fun readAndSync() {
         try {
+            // 主服务停了或用户主动停止 → IME 不发送
+            if (ClipSyncService.instance == null) return
+            val prefs = getSharedPreferences(Sync.PREFS_NAME, MODE_PRIVATE)
+            if (prefs.getBoolean("manually_stopped", false)) return
+
             val clip = clipboardManager?.primaryClip
             if (clip == null || clip.itemCount == 0) return
             val text = clip.getItemAt(0)?.text?.toString()

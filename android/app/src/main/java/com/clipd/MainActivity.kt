@@ -721,6 +721,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun stopSync() {
+        Sync.notifyDisconnect()
         stopService(Intent(this, ClipSyncService::class.java))
         isRunning = false
         btnToggle.text = "开始同步"

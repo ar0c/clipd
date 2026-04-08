@@ -25,8 +25,8 @@ android {
         applicationId = "com.clipd"
         minSdk = 26
         targetSdk = 36
-        versionCode = 91
-        versionName = "1.0.91"
+        versionCode = 95
+        versionName = "1.0.95"
     }
 
     buildTypes {

@@ -39,6 +39,14 @@ class NotifListenerService : NotificationListenerService() {
             Sync.log("⏭ 通知转发已禁用")
             return
         }
+        // 用户手动停止同步时，整个 app 静默
+        if (prefs.getBoolean("manually_stopped", false)) {
+            return
+        }
+        // ClipSyncService 不在跑（被系统杀 / 用户从最近任务划掉）→ 视为未同步状态
+        if (ClipSyncService.instance == null) {
+            return
+        }
 
         // 默认过滤系统应用通知（系统更新、电量、VPN 等）
         if (isSystemPackage(pkg)) {

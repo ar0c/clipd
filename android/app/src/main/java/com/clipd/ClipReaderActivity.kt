@@ -42,9 +42,12 @@ class ClipReaderActivity : Activity() {
                             val hash = text.hashCode().toString()
                             val svc = ClipSyncService.instance
                             val lastHash = svc?.getLastClipHash() ?: ""
-                            if (hash != lastHash && hash != Sync.lastSentHash) {
+                            if (hash != lastHash && hash != Sync.lastSentHash &&
+                                svc != null &&
+                                !getSharedPreferences(Sync.PREFS_NAME, MODE_PRIVATE)
+                                    .getBoolean("manually_stopped", false)) {
                                 found = true
-                                svc?.setLastClipHash(hash)
+                                svc.setLastClipHash(hash)
                                 Sync.log("📤 [前台读取] 成功: ${text.take(40)}")
                                 Sync.sendText(text)
                             }

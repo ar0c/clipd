@@ -333,6 +333,24 @@ object Sync {
     /** TCP 连通 + HTTP /ping 验证是 clipd server（internal 供 MainActivity 调用）*/
     fun isClipdServerPublic(ip: String) = isClipdServer(ip)
 
+    /** 通知桌面端主动断开（停止同步时调用），让桌面立即清状态 */
+    fun notifyDisconnect() {
+        val ip = ubuntuIp ?: return
+        executor.execute {
+            try {
+                val conn = java.net.URL("http://$ip:$UBUNTU_HTTP_PORT/disconnect")
+                    .openConnection() as java.net.HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.connectTimeout = 2000
+                conn.readTimeout = 2000
+                conn.outputStream.use { it.write(byteArrayOf()) }
+                conn.responseCode
+                conn.disconnect()
+            } catch (_: Exception) {}
+        }
+    }
+
     private fun isClipdServer(ip: String): Boolean {
         return try {
             val url = java.net.URL("http://$ip:$UBUNTU_HTTP_PORT/ping")

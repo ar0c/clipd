@@ -148,7 +148,7 @@ class ClipdWindow(Gtk.ApplicationWindow):
         self._start_journal_tail()
 
         # 定时刷新状态（1s）
-        GLib.timeout_add(1000, self._refresh)
+        GLib.timeout_add(3000, self._refresh)
         # 首次立即刷新
         GLib.idle_add(self._refresh)
 
@@ -481,7 +481,7 @@ class ClipdWindow(Gtk.ApplicationWindow):
                 if ip_m and "反向通知失败" not in line:
                     self._stats["android_ip"] = ip_m.group(1)
 
-            GLib.idle_add(self._update_log_view)
+            GLib.idle_add(self._schedule_log_refresh)
 
     def _update_log_view(self):
         # 最新的在最上面
@@ -489,12 +489,20 @@ class ClipdWindow(Gtk.ApplicationWindow):
         # 滚动到顶
         start = self.log_buf.get_start_iter()
         self.log_view.scroll_to_iter(start, 0, True, 0, 0)
+        self._log_refresh_pending = False
         return False
+
+    def _schedule_log_refresh(self):
+        """去抖：300ms 内多次请求只刷新一次，避免 journal 高频写入时 GTK 卡顿。"""
+        if getattr(self, '_log_refresh_pending', False):
+            return
+        self._log_refresh_pending = True
+        GLib.timeout_add(300, self._update_log_view)
 
     def _append_log(self, msg):
         ts = time.strftime("%H:%M:%S")
         self._log_lines.append(f"[{ts}] {msg}")
-        GLib.idle_add(self._update_log_view)
+        GLib.idle_add(self._schedule_log_refresh)
 
     def do_destroy(self):
         if self._journal_proc and self._journal_proc.poll() is None:
