@@ -697,6 +697,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startSync() {
+        KeepAliveJobService.schedule(this)
         startForegroundService(Intent(this, ClipSyncService::class.java))
         isRunning = true
         btnToggle.text = "停止同步"

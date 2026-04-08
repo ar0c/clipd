@@ -721,23 +721,48 @@ def _do_push():
 
 
 def watch_wayland_clipboard():
-    """Wayland 原生剪贴板监听：wl-paste --watch 每次 selection 变化触发回调。"""
+    """Wayland 原生剪贴板监听。
+    需要 compositor 支持 wlr-data-control 协议（sway/Hyprland 等）。
+    GNOME Mutter / KDE 不支持，会自动放弃；XWayland 路径仍由 watch_and_push 兜底。"""
     import shutil
     if not shutil.which("wl-paste"):
         print("[clipd] 未安装 wl-clipboard，Wayland 监听跳过", flush=True)
         return
-    print("[clipd] Wayland 剪贴板监听已启动 (wl-paste --watch)", flush=True)
-    # 用 sh -c 运行内联命令，wl-paste 会在 selection 改变时调用一次 sh -c "..."
+    # 探测协议支持
     try:
-        proc = subprocess.Popen(
-            ["wl-paste", "--watch", "sh", "-c", "echo CLIP_CHANGED"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        probe = subprocess.run(
+            ["wl-paste", "--watch", "true"],
+            capture_output=True, text=True, timeout=2,
         )
-        for line in proc.stdout:
-            if "CLIP_CHANGED" in line and _push_executor is not None:
-                _push_executor.submit(_do_push)
+        err = (probe.stderr or "") + (probe.stdout or "")
+        if "wlroots data-control" in err or "wlr-data-control" in err:
+            print("[clipd] compositor 不支持 wlr-data-control 协议（GNOME/KDE），"
+                  "Wayland 原生监听不可用，仅 XWayland 路径生效", flush=True)
+            return
+    except subprocess.TimeoutExpired:
+        pass  # 协议支持，--watch 会一直阻塞，超时是预期
     except Exception as e:
-        print(f"[clipd] wl-paste --watch 失败: {e}", flush=True)
+        print(f"[clipd] wl-paste 探测失败: {e}", flush=True)
+        return
+
+    print("[clipd] Wayland 剪贴板监听已启动 (wl-paste --watch)", flush=True)
+    while True:
+        try:
+            proc = subprocess.Popen(
+                ["wl-paste", "--watch", "sh", "-c", "echo CLIP_CHANGED"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            for line in proc.stdout:
+                if "CLIP_CHANGED" in line and _push_executor is not None:
+                    _push_executor.submit(_do_push)
+            err = proc.stderr.read() if proc.stderr else ""
+            if err:
+                print(f"[clipd] wl-paste --watch 退出: {err.strip()[:200]}", flush=True)
+            else:
+                print("[clipd] wl-paste --watch 退出，5 秒后重启", flush=True)
+        except Exception as e:
+            print(f"[clipd] wl-paste --watch 异常: {e}, 5 秒后重启", flush=True)
+        time.sleep(5)
 
 
 def watch_and_push():

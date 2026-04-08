@@ -10,6 +10,7 @@ class BootReceiver : BroadcastReceiver() {
             intent.action == "android.intent.action.QUICKBOOT_POWERON") {
             val prefs = context.getSharedPreferences(Sync.PREFS_NAME, Context.MODE_PRIVATE)
             if (prefs.getBoolean("manually_stopped", false)) return
+            KeepAliveJobService.schedule(context)
             context.startForegroundService(Intent(context, ClipSyncService::class.java))
         }
     }

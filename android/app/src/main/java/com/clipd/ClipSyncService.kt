@@ -61,11 +61,28 @@ class ClipSyncService : Service() {
     private var heartbeatRunnable: Runnable? = null
     private val heartbeatIntervalMs = 10_000L
 
+    private fun ensureOverlayAlive() {
+        if (!android.provider.Settings.canDrawOverlays(this)) return
+        if (overlayView == null) {
+            try { addOverlay() } catch (_: Exception) {}
+        }
+    }
+
     private fun ensureNotifListenerBound() {
-        // vivo 等 OEM 会杀掉 NotificationListenerService 进程；周期性请求 rebind
+        // vivo 等 OEM 会杀掉 NotificationListenerService 进程或 unbind。
+        // 1) requestRebind 处理 unbind 情况；2) 切换 component 状态强制系统重新评估并启动绑定
+        val cn = android.content.ComponentName(this, NotifListenerService::class.java)
         try {
-            val cn = android.content.ComponentName(this, NotifListenerService::class.java)
             android.service.notification.NotificationListenerService.requestRebind(cn)
+        } catch (_: Exception) {}
+        try {
+            val pm = packageManager
+            pm.setComponentEnabledSetting(cn,
+                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                android.content.pm.PackageManager.DONT_KILL_APP)
+            pm.setComponentEnabledSetting(cn,
+                android.content.pm.PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                android.content.pm.PackageManager.DONT_KILL_APP)
         } catch (_: Exception) {}
     }
 
@@ -74,6 +91,7 @@ class ClipSyncService : Service() {
         heartbeatRunnable = object : Runnable {
             override fun run() {
                 ensureNotifListenerBound()
+                ensureOverlayAlive()
                 Sync.executor.execute {
                     val ip = Sync.ubuntuIp
                     if (!ip.isNullOrBlank()) {
@@ -421,6 +439,7 @@ class ClipSyncService : Service() {
         clipboardManager?.removePrimaryClipChangedListener(clipListener)
         removeOverlay()
         screenshotObserver?.let { contentResolver.unregisterContentObserver(it) }
+        receiveServerRunning = false
         serverSocket?.close()
         Sync.stopDiscovery()
         runCatching { (getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager)
@@ -477,17 +496,25 @@ class ClipSyncService : Service() {
 
     // ── HTTP 服务器（接收来自 Ubuntu 的文字）─────────────────────────────────
 
+    @Volatile private var receiveServerRunning = false
+
     private fun startReceiveServer() {
+        if (receiveServerRunning) return
+        receiveServerRunning = true
         Thread {
-            try {
-                val ss = ServerSocket(Sync.ANDROID_HTTP_PORT).also { serverSocket = it }
-                Log.i(Sync.TAG, "HTTP server on :${Sync.ANDROID_HTTP_PORT}")
-                while (!ss.isClosed) {
-                    val client = ss.accept()
-                    Thread { handleClient(client) }.start()
+            while (receiveServerRunning) {
+                try {
+                    val ss = ServerSocket(Sync.ANDROID_HTTP_PORT).also { serverSocket = it }
+                    Log.i(Sync.TAG, "HTTP server on :${Sync.ANDROID_HTTP_PORT}")
+                    while (!ss.isClosed) {
+                        val client = ss.accept()
+                        Thread { handleClient(client) }.start()
+                    }
+                } catch (e: Exception) {
+                    if (!receiveServerRunning) break
+                    Sync.log("⚠ HTTP server 异常重启: ${e.message}")
+                    Thread.sleep(2000)
                 }
-            } catch (e: Exception) {
-                if (serverSocket?.isClosed == false) Log.e(Sync.TAG, "Server error: ${e.message}")
             }
         }.start()
     }
