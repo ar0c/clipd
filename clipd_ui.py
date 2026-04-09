@@ -20,10 +20,15 @@ ANDROID_PORT = 8889
 
 # ── systemctl helpers ────────────────────────────────────────────────────────
 
+_SYSTEMCTL = "/usr/bin/systemctl"
+_IP = "/usr/bin/ip"
+_JOURNALCTL = "/usr/bin/journalctl"
+
+
 def _systemctl(*args):
     try:
         r = subprocess.run(
-            ["systemctl", "--user", *args],
+            [_SYSTEMCTL, "--user", *args],
             capture_output=True, text=True, timeout=10,
         )
         return r.returncode == 0, r.stdout.strip()
@@ -112,9 +117,16 @@ def parse_log_stats(lines: list[str]) -> dict:
 
 # ── 获取本机 IP ──────────────────────────────────────────────────────────────
 
+_lan_ip_cache = {"ip": "?", "ts": 0.0}
+
+
 def get_lan_ip():
+    # 缓存 30 秒，避免 _refresh 每次 fork
+    now = time.time()
+    if now - _lan_ip_cache["ts"] < 30:
+        return _lan_ip_cache["ip"]
     try:
-        out = subprocess.check_output(["ip", "-o", "-4", "addr"], text=True, stderr=subprocess.DEVNULL)
+        out = subprocess.check_output([_IP, "-o", "-4", "addr"], text=True, stderr=subprocess.DEVNULL)
         skip = ("lo", "docker", "br-", "veth", "lxc", "tailscale0", "Mihomo", "tun", "wg")
         for line in out.splitlines():
             parts = line.split()
@@ -125,10 +137,13 @@ def get_lan_ip():
                 continue
             ip = parts[3].split("/")[0]
             if ip.startswith("192.168.") or ip.startswith("10."):
+                _lan_ip_cache["ip"] = ip
+                _lan_ip_cache["ts"] = now
                 return ip
     except Exception:
         pass
-    return "?"
+    _lan_ip_cache["ts"] = now
+    return _lan_ip_cache["ip"]
 
 
 # ── GTK 窗口 ─────────────────────────────────────────────────────────────────
@@ -147,10 +162,10 @@ class ClipdWindow(Gtk.ApplicationWindow):
         self._build_ui()
         self._start_journal_tail()
 
-        # 定时刷新状态（1s）
+        # 定时刷新状态
         GLib.timeout_add(3000, self._refresh)
-        # 首次立即刷新
-        GLib.idle_add(self._refresh)
+        # 首次立即刷新（lambda 返回 False，单次调用，否则 idle_add 看到 _refresh 的 True 会无限重排）
+        GLib.idle_add(lambda: (self._refresh(), False)[1])
 
     def _apply_css(self):
         css = b"""
@@ -298,7 +313,7 @@ class ClipdWindow(Gtk.ApplicationWindow):
         """在后台线程执行 systemctl 操作"""
         def _do():
             ok, msg = action_fn()
-            GLib.idle_add(self._refresh)
+            GLib.idle_add(lambda: (self._refresh(), False)[1])
             if not ok:
                 GLib.idle_add(self._show_error, f"{action_name}失败: {msg}")
         threading.Thread(target=_do, daemon=True).start()
@@ -439,7 +454,7 @@ class ClipdWindow(Gtk.ApplicationWindow):
         n_arg = "0" if fresh else "200"
         try:
             self._journal_proc = subprocess.Popen(
-                ["journalctl", "--user", "-u", SERVICE_NAME,
+                [_JOURNALCTL, "--user", "-u", SERVICE_NAME,
                  "-f", "-n", n_arg, "--no-hostname", "-o", "short-iso"],
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True,
