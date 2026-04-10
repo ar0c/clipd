@@ -28,6 +28,7 @@ ANDROID_PORT    = 8889
 DISCOVERY_PORT  = 8890
 BROADCAST_INTERVAL = 3
 APP_ID          = "clipd"
+APP_VERSION     = "1.0.96"
 APP_DISPLAY_NAME = "Clipd 桌面端"
 _notify_inited  = False
 
@@ -179,7 +180,25 @@ def notify(msg: str, img_data: bytes = None):
         threading.Thread(target=_rm, daemon=True).start()
 
 
-def _send_notification(summary: str, body: str = "", icon: str = "edit-paste", expire_time: int = 4000):
+def _send_notification(summary: str, body: str = "", icon: str = "edit-paste",
+                       expire_time: int = 4000, open_dir: str = ""):
+    if open_dir:
+        # notify-send --action 支持点击回调，需阻塞等待，放后台线程
+        def _notify_with_action():
+            cmd = ["notify-send", summary, body or "",
+                   f"--icon={icon}", f"--app-name={APP_DISPLAY_NAME}",
+                   "--hint=string:desktop-entry:clipd",
+                   "-A", "default=打开目录"]
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode == 0 and "default" in (r.stdout or ""):
+                    subprocess.Popen(["xdg-open", open_dir],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+        threading.Thread(target=_notify_with_action, daemon=True).start()
+        return
+
     global _notify_inited
     try:
         import gi
@@ -221,6 +240,7 @@ def _tray_menu(status_text: str):
     import pystray
     return pystray.Menu(
         pystray.MenuItem(status_text, None, enabled=False),
+        pystray.MenuItem(f"v{APP_VERSION}", None, enabled=False),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("显示配对码", lambda icon, item: show_qr()),
         pystray.Menu.SEPARATOR,
@@ -674,7 +694,8 @@ class ClipHandler(http.server.BaseHTTPRequestHandler):
             try:
                 _send_notification("文件已接收 ← Android",
                                    f"{filename}\n{dest}",
-                                   icon="document-save", expire_time=6000)
+                                   icon="document-save", expire_time=6000,
+                                   open_dir=dest_dir)
             except Exception:
                 pass
             self.send_response(200)
@@ -963,6 +984,7 @@ def _watchdog_android():
 # ── 主入口 ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    print(f"[clipd] v{APP_VERSION} 启动", flush=True)
     _stats["start_time"] = time.time()
     create_tray()
 
