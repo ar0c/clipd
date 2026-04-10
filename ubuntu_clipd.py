@@ -297,20 +297,30 @@ def _send_notification(summary: str, body: str = "", icon: str = "edit-paste",
 _TRAY_ICON_DIR = os.path.expanduser("~/.local/share/clipd")
 _TRAY_ICON_CONNECTED = os.path.join(_TRAY_ICON_DIR, "tray_connected.png")
 _TRAY_ICON_DISCONNECTED = os.path.join(_TRAY_ICON_DIR, "tray_disconnected.png")
-_indicator = None
-_gtk_loop = None
+_sni_obj = None
 
 
 def _ensure_tray_icons():
-    """生成持久化托盘图标文件（AppIndicator3 需要磁盘路径）"""
+    """生成持久化托盘图标文件"""
     from PIL import Image, ImageDraw
     os.makedirs(_TRAY_ICON_DIR, exist_ok=True)
-    for path, color in [(_TRAY_ICON_CONNECTED, (46, 204, 113, 255)),
-                         (_TRAY_ICON_DISCONNECTED, (149, 165, 166, 255))]:
-        if not os.path.exists(path):
-            img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-            ImageDraw.Draw(img).ellipse([6, 6, 58, 58], fill=color)
-            img.save(path, "PNG")
+    for path, dot_color in [(_TRAY_ICON_CONNECTED, (46, 204, 113, 255)),
+                             (_TRAY_ICON_DISCONNECTED, (149, 165, 166, 255))]:
+        if os.path.exists(path):
+            continue
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        board_color = (220, 220, 220, 255)
+        d.rounded_rectangle([10, 8, 54, 60], radius=5, fill=board_color, outline=(160, 160, 160, 255), width=2)
+        clip_color = (130, 130, 130, 255)
+        d.rounded_rectangle([22, 2, 42, 16], radius=4, fill=clip_color)
+        d.rectangle([26, 10, 38, 16], fill=board_color)
+        line_color = (180, 180, 180, 255)
+        for y in [24, 33, 42]:
+            w = 30 if y < 42 else 20
+            d.rounded_rectangle([18, y, 18 + w, y + 4], radius=2, fill=line_color)
+        d.ellipse([42, 46, 58, 62], fill=dot_color, outline=(255, 255, 255, 255), width=2)
+        img.save(path, "PNG")
 
 
 def _tray_status(connected: bool, label: str = "") -> str:
@@ -319,77 +329,255 @@ def _tray_status(connected: bool, label: str = "") -> str:
     return f"{APP_DISPLAY_NAME} - {'已连接' if connected else '等待连接'}"
 
 
-def _build_tray_menu(status_text: str):
-    import gi
-    gi.require_version('Gtk', '3.0')
-    from gi.repository import Gtk
-    menu = Gtk.Menu()
-    # 状态
-    item_status = Gtk.MenuItem(label=status_text)
-    item_status.set_sensitive(False)
-    menu.append(item_status)
-    # 版本
-    item_ver = Gtk.MenuItem(label=f"v{APP_VERSION}")
-    item_ver.set_sensitive(False)
-    menu.append(item_ver)
-    menu.append(Gtk.SeparatorMenuItem())
-    # 配对码
-    item_qr = Gtk.MenuItem(label="显示配对码")
-    item_qr.connect("activate", lambda _: show_qr())
-    menu.append(item_qr)
-    menu.append(Gtk.SeparatorMenuItem())
-    # 退出
-    item_quit = Gtk.MenuItem(label="退出")
-    item_quit.connect("activate", lambda _: os._exit(0))
-    menu.append(item_quit)
-    menu.show_all()
-    return menu
+def _on_tray_activate():
+    """托盘图标双击回调：打开 UI 窗口"""
+    subprocess.Popen(["gio", "launch",
+                      os.path.expanduser("~/.local/share/applications/com.clipd.manager.desktop")],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def create_tray():
-    global _indicator, _gtk_loop
+    """用 dbus-python 实现 SNI + DBusMenu（单击菜单，双击配对码）"""
+    global _sni_obj
     try:
-        import gi
-        gi.require_version('Gtk', '3.0')
-        gi.require_version('AyatanaAppIndicator3', '0.1')
-        from gi.repository import Gtk, AyatanaAppIndicator3, GLib
+        import dbus
+        import dbus.service
+        from dbus.mainloop.glib import DBusGMainLoop
+        from gi.repository import GLib
 
         _ensure_tray_icons()
+        DBusGMainLoop(set_as_default=True)
+        bus = dbus.SessionBus()
+        pid = os.getpid()
+        sni_name = f"org.kde.StatusNotifierItem-{pid}-1"
 
-        _indicator = AyatanaAppIndicator3.Indicator.new(
-            APP_ID, _TRAY_ICON_DISCONNECTED,
-            AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS
-        )
-        _indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
-        _indicator.set_title(_tray_status(False))
-        _indicator.set_menu(_build_tray_menu(_tray_status(False)))
+        # ── DBusMenu（单击弹出的菜单） ──
+        class DBusMenu(dbus.service.Object):
+            IFACE = "com.canonical.dbusmenu"
 
-        # Gtk.main() 必须在独立线程跑
-        def _gtk_thread():
-            GLib.set_prgname(APP_ID)
-            Gtk.main()
-        _gtk_loop = threading.Thread(target=_gtk_thread, daemon=True)
-        _gtk_loop.start()
-        print("[clipd] 托盘图标已启动 (AppIndicator3)")
+            def __init__(self, bus_name):
+                super().__init__(bus_name, "/MenuBar")
+                self._revision = 1
+                self._status_label = _tray_status(False)
+
+            def update_status(self, label):
+                self._status_label = label
+                self._revision += 1
+                self.LayoutUpdated(self._revision, 0)
+
+            def _build_layout(self):
+                """构建菜单树：root → [状态, 版本, ---, 配对码, ---, 退出]"""
+                items = [
+                    (1, {"label": dbus.String(self._status_label),
+                         "enabled": dbus.Boolean(False), "visible": dbus.Boolean(True)}),
+                    (2, {"label": dbus.String(f"v{APP_VERSION}"),
+                         "enabled": dbus.Boolean(False), "visible": dbus.Boolean(True)}),
+                    (3, {"type": dbus.String("separator"), "visible": dbus.Boolean(True)}),
+                    (4, {"label": dbus.String("显示配对码"),
+                         "enabled": dbus.Boolean(True), "visible": dbus.Boolean(True)}),
+                    (5, {"type": dbus.String("separator"), "visible": dbus.Boolean(True)}),
+                    (6, {"label": dbus.String("退出"),
+                         "enabled": dbus.Boolean(True), "visible": dbus.Boolean(True)}),
+                ]
+                children = []
+                for item_id, props in items:
+                    children.append(dbus.Struct(
+                        (dbus.Int32(item_id),
+                         dbus.Dictionary(props, signature="sv"),
+                         dbus.Array([], signature="v")),
+                        signature="ia{sv}av"))
+                root_props = {"children-display": dbus.String("submenu")}
+                return dbus.Struct(
+                    (dbus.Int32(0),
+                     dbus.Dictionary(root_props, signature="sv"),
+                     dbus.Array(children, signature="v")),
+                    signature="ia{sv}av")
+
+            @dbus.service.method(IFACE, in_signature="iias", out_signature="u(ia{sv}av)")
+            def GetLayout(self, parent_id, recursion_depth, property_names):
+                return (dbus.UInt32(self._revision), self._build_layout())
+
+            @dbus.service.method(IFACE, in_signature="aias", out_signature="a(ia{sv})")
+            def GetGroupProperties(self, ids, property_names):
+                layout = self._build_layout()
+                result = []
+                for child in layout[2]:  # children
+                    if child[0] in ids or not ids:
+                        result.append((child[0], child[1]))
+                return dbus.Array(result, signature="(ia{sv})")
+
+            @dbus.service.method(IFACE, in_signature="is", out_signature="v")
+            def GetProperty(self, item_id, name):
+                return dbus.String("")
+
+            @dbus.service.method(IFACE, in_signature="isvu")
+            def Event(self, item_id, event_type, data, timestamp):
+                if event_type == "clicked":
+                    if item_id == 4:
+                        show_qr()
+                    elif item_id == 6:
+                        os._exit(0)
+
+            @dbus.service.method(IFACE, in_signature="a(isvu)", out_signature="ai")
+            def EventGroup(self, events):
+                for item_id, event_type, data, timestamp in events:
+                    self.Event(item_id, event_type, data, timestamp)
+                return dbus.Array([], signature="i")
+
+            @dbus.service.method(IFACE, in_signature="i", out_signature="b")
+            def AboutToShow(self, item_id):
+                return False
+
+            @dbus.service.method(IFACE, in_signature="ai", out_signature="aiai")
+            def AboutToShowGroup(self, ids):
+                return (dbus.Array([], signature="i"), dbus.Array([], signature="i"))
+
+            @dbus.service.signal(IFACE, signature="ui")
+            def LayoutUpdated(self, revision, parent): pass
+
+            @dbus.service.signal(IFACE, signature="a(ia{sv})a(ias)")
+            def ItemsPropertiesUpdated(self, updated, removed): pass
+
+            # properties
+            @dbus.service.method(dbus.PROPERTIES_IFACE,
+                                 in_signature="ss", out_signature="v")
+            def Get(self, iface, prop):
+                return {"Version": dbus.UInt32(4),
+                        "Status": dbus.String("normal"),
+                        "TextDirection": dbus.String("ltr"),
+                        "IconThemePath": dbus.Array([], signature="s"),
+                        }.get(prop, "")
+
+            @dbus.service.method(dbus.PROPERTIES_IFACE,
+                                 in_signature="s", out_signature="a{sv}")
+            def GetAll(self, iface):
+                return {"Version": dbus.UInt32(4),
+                        "Status": dbus.String("normal"),
+                        "TextDirection": dbus.String("ltr"),
+                        "IconThemePath": dbus.Array([], signature="s")}
+
+        # ── SNI 主体 ──
+        class StatusNotifierItem(dbus.service.Object):
+            IFACE = "org.kde.StatusNotifierItem"
+
+            def __init__(self, bus_name, dbusmenu):
+                self._icon_name = _TRAY_ICON_DISCONNECTED
+                self._title = _tray_status(False)
+                self._dbusmenu = dbusmenu
+                super().__init__(bus_name, "/StatusNotifierItem")
+
+            @dbus.service.method(IFACE, in_signature="ii")
+            def Activate(self, x, y):
+                _on_tray_activate()
+
+            @dbus.service.method(IFACE, in_signature="ii")
+            def SecondaryActivate(self, x, y):
+                pass
+
+            @dbus.service.method(IFACE, in_signature="ii")
+            def ContextMenu(self, x, y):
+                pass
+
+            @dbus.service.method(IFACE, in_signature="is")
+            def Scroll(self, delta, orientation):
+                pass
+
+            @dbus.service.method(dbus.PROPERTIES_IFACE,
+                                 in_signature="ss", out_signature="v")
+            def Get(self, iface, prop):
+                if iface != self.IFACE:
+                    return ""
+                props = {
+                    "Category": "ApplicationStatus",
+                    "Id": APP_ID,
+                    "Title": self._title,
+                    "Status": "Active",
+                    "IconName": "",
+                    "IconThemePath": os.path.dirname(self._icon_name),
+                    "IconPixmap": self._get_pixmap(),
+                    "OverlayIconName": "",
+                    "OverlayIconPixmap": dbus.Array([], signature="(iiay)"),
+                    "AttentionIconName": "",
+                    "AttentionIconPixmap": dbus.Array([], signature="(iiay)"),
+                    "AttentionMovieName": "",
+                    "ToolTip": dbus.Struct(
+                        ("", dbus.Array([], signature="(iiay)"),
+                         self._title, ""),
+                        signature="sa(iiay)ss"),
+                    "ItemIsMenu": dbus.Boolean(False),
+                    "Menu": dbus.ObjectPath("/MenuBar"),
+                    "WindowId": dbus.Int32(0),
+                }
+                return props.get(prop, "")
+
+            @dbus.service.method(dbus.PROPERTIES_IFACE,
+                                 in_signature="s", out_signature="a{sv}")
+            def GetAll(self, iface):
+                result = {}
+                for prop in ["Category", "Id", "Title", "Status",
+                             "IconName", "IconThemePath", "IconPixmap",
+                             "OverlayIconName", "OverlayIconPixmap",
+                             "AttentionIconName", "AttentionIconPixmap",
+                             "AttentionMovieName", "ToolTip",
+                             "ItemIsMenu", "Menu", "WindowId"]:
+                    result[prop] = self.Get(iface, prop)
+                return result
+
+            @dbus.service.signal(IFACE)
+            def NewIcon(self): pass
+            @dbus.service.signal(IFACE)
+            def NewTitle(self): pass
+
+            _pixmap_cache = {}
+            def _get_pixmap(self):
+                path = self._icon_name
+                if path not in self._pixmap_cache:
+                    from PIL import Image
+                    img = Image.open(path).convert("RGBA")
+                    w, h = img.size
+                    raw = bytearray()
+                    for r, g, b, a in img.getdata():
+                        raw += bytes([a, r, g, b])
+                    self._pixmap_cache[path] = dbus.Array(
+                        [dbus.Struct((dbus.Int32(w), dbus.Int32(h),
+                                      dbus.Array(raw, signature="y")),
+                                     signature="iiay")],
+                        signature="(iiay)")
+                return self._pixmap_cache[path]
+
+            def set_icon(self, path, title):
+                self._icon_name = path
+                self._title = title
+                self._dbusmenu.update_status(title)
+                self.NewIcon()
+                self.NewTitle()
+
+        bus_name = dbus.service.BusName(sni_name, bus)
+        dbusmenu = DBusMenu(bus_name)
+        _sni_obj = StatusNotifierItem(bus_name, dbusmenu)
+
+        # 注册到 StatusNotifierWatcher
+        watcher = bus.get_object("org.kde.StatusNotifierWatcher",
+                                 "/StatusNotifierWatcher")
+        watcher.RegisterStatusNotifierItem(
+            sni_name, dbus_interface="org.kde.StatusNotifierWatcher")
+
+        def _glib_thread():
+            GLib.MainLoop().run()
+        threading.Thread(target=_glib_thread, daemon=True).start()
+        print("[clipd] 托盘图标已启动 (SNI + DBusMenu)")
     except Exception as e:
         print(f"[clipd] 托盘初始化失败: {e}")
+        import traceback; traceback.print_exc()
 
 
 def update_tray(connected: bool, label: str = ""):
-    if _indicator is None:
+    if _sni_obj is None:
         return
     try:
-        import gi
-        gi.require_version('Gtk', '3.0')
-        from gi.repository import GLib
         icon_path = _TRAY_ICON_CONNECTED if connected else _TRAY_ICON_DISCONNECTED
         status = _tray_status(connected, label)
-
-        def _update():
-            _indicator.set_icon_full(icon_path, status)
-            _indicator.set_title(status)
-            _indicator.set_menu(_build_tray_menu(status))
-        GLib.idle_add(_update)
+        _sni_obj.set_icon(icon_path, status)
     except Exception as e:
         print(f"[clipd] 托盘更新失败: {e}")
 
