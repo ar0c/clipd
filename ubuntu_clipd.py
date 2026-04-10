@@ -294,25 +294,23 @@ def _send_notification(summary: str, body: str = "", icon: str = "edit-paste",
 
 # ── 系统托盘 ──────────────────────────────────────────────────────────────────
 
-def _make_tray_image(connected: bool):
+_TRAY_ICON_DIR = os.path.expanduser("~/.local/share/clipd")
+_TRAY_ICON_CONNECTED = os.path.join(_TRAY_ICON_DIR, "tray_connected.png")
+_TRAY_ICON_DISCONNECTED = os.path.join(_TRAY_ICON_DIR, "tray_disconnected.png")
+_indicator = None
+_gtk_loop = None
+
+
+def _ensure_tray_icons():
+    """生成持久化托盘图标文件（AppIndicator3 需要磁盘路径）"""
     from PIL import Image, ImageDraw
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    color = (46, 204, 113, 255) if connected else (149, 165, 166, 255)
-    draw.ellipse([6, 6, 58, 58], fill=color)
-    return img
-
-
-def _tray_menu(status_text: str):
-    import pystray
-    return pystray.Menu(
-        pystray.MenuItem(status_text, None, enabled=False),
-        pystray.MenuItem(f"v{APP_VERSION}", None, enabled=False),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("显示配对码", lambda icon, item: show_qr()),
-        pystray.Menu.SEPARATOR,
-        pystray.MenuItem("退出", lambda icon, item: (icon.stop(), os._exit(0))),
-    )
+    os.makedirs(_TRAY_ICON_DIR, exist_ok=True)
+    for path, color in [(_TRAY_ICON_CONNECTED, (46, 204, 113, 255)),
+                         (_TRAY_ICON_DISCONNECTED, (149, 165, 166, 255))]:
+        if not os.path.exists(path):
+            img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            ImageDraw.Draw(img).ellipse([6, 6, 58, 58], fill=color)
+            img.save(path, "PNG")
 
 
 def _tray_status(connected: bool, label: str = "") -> str:
@@ -321,32 +319,77 @@ def _tray_status(connected: bool, label: str = "") -> str:
     return f"{APP_DISPLAY_NAME} - {'已连接' if connected else '等待连接'}"
 
 
+def _build_tray_menu(status_text: str):
+    import gi
+    gi.require_version('Gtk', '3.0')
+    from gi.repository import Gtk
+    menu = Gtk.Menu()
+    # 状态
+    item_status = Gtk.MenuItem(label=status_text)
+    item_status.set_sensitive(False)
+    menu.append(item_status)
+    # 版本
+    item_ver = Gtk.MenuItem(label=f"v{APP_VERSION}")
+    item_ver.set_sensitive(False)
+    menu.append(item_ver)
+    menu.append(Gtk.SeparatorMenuItem())
+    # 配对码
+    item_qr = Gtk.MenuItem(label="显示配对码")
+    item_qr.connect("activate", lambda _: show_qr())
+    menu.append(item_qr)
+    menu.append(Gtk.SeparatorMenuItem())
+    # 退出
+    item_quit = Gtk.MenuItem(label="退出")
+    item_quit.connect("activate", lambda _: os._exit(0))
+    menu.append(item_quit)
+    menu.show_all()
+    return menu
+
+
 def create_tray():
-    global _tray_icon
+    global _indicator, _gtk_loop
     try:
-        import pystray
-        _tray_icon = pystray.Icon(
-            APP_ID,
-            _make_tray_image(False),
-            _tray_status(False),
-            _tray_menu(_tray_status(False)),
+        import gi
+        gi.require_version('Gtk', '3.0')
+        gi.require_version('AyatanaAppIndicator3', '0.1')
+        from gi.repository import Gtk, AyatanaAppIndicator3, GLib
+
+        _ensure_tray_icons()
+
+        _indicator = AyatanaAppIndicator3.Indicator.new(
+            APP_ID, _TRAY_ICON_DISCONNECTED,
+            AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS
         )
-        _tray_icon.run_detached()
-        print("[clipd] 托盘图标已启动")
-    except ImportError:
-        print("[clipd] pystray 未安装，跳过托盘（pip3 install pystray）")
+        _indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
+        _indicator.set_title(_tray_status(False))
+        _indicator.set_menu(_build_tray_menu(_tray_status(False)))
+
+        # Gtk.main() 必须在独立线程跑
+        def _gtk_thread():
+            GLib.set_prgname(APP_ID)
+            Gtk.main()
+        _gtk_loop = threading.Thread(target=_gtk_thread, daemon=True)
+        _gtk_loop.start()
+        print("[clipd] 托盘图标已启动 (AppIndicator3)")
     except Exception as e:
         print(f"[clipd] 托盘初始化失败: {e}")
 
 
 def update_tray(connected: bool, label: str = ""):
-    if _tray_icon is None:
+    if _indicator is None:
         return
     try:
+        import gi
+        gi.require_version('Gtk', '3.0')
+        from gi.repository import GLib
+        icon_path = _TRAY_ICON_CONNECTED if connected else _TRAY_ICON_DISCONNECTED
         status = _tray_status(connected, label)
-        _tray_icon.icon  = _make_tray_image(connected)
-        _tray_icon.title = status
-        _tray_icon.menu  = _tray_menu(status)
+
+        def _update():
+            _indicator.set_icon_full(icon_path, status)
+            _indicator.set_title(status)
+            _indicator.set_menu(_build_tray_menu(status))
+        GLib.idle_add(_update)
     except Exception as e:
         print(f"[clipd] 托盘更新失败: {e}")
 
