@@ -28,7 +28,7 @@ ANDROID_PORT    = 8889
 DISCOVERY_PORT  = 8890
 BROADCAST_INTERVAL = 3
 APP_ID          = "clipd"
-APP_VERSION     = "1.0.96"
+APP_VERSION     = "1.0.97"
 APP_DISPLAY_NAME = "Clipd 桌面端"
 _notify_inited  = False
 
@@ -180,8 +180,40 @@ def notify(msg: str, img_data: bytes = None):
         threading.Thread(target=_rm, daemon=True).start()
 
 
+def _extract_code(text: str) -> str:
+    """从短信/通知文本中提取验证码（4-8位纯数字）"""
+    import re
+    m = re.search(r'(?:验证码|校验码|确认码|动态码|短信码|code)[：:\s]*(\d{4,8})', text, re.IGNORECASE)
+    if m: return m.group(1)
+    m = re.search(r'(\d{4,8})\s*(?:验证码|校验码|确认码|动态码|为.*验证)', text)
+    if m: return m.group(1)
+    # 通用：文本中唯一的 4-8 位数字串
+    nums = re.findall(r'\b(\d{4,8})\b', text)
+    if len(nums) == 1: return nums[0]
+    return ""
+
+
 def _send_notification(summary: str, body: str = "", icon: str = "edit-paste",
-                       expire_time: int = 4000, open_dir: str = ""):
+                       expire_time: int = 4000, open_dir: str = "",
+                       copy_text: str = ""):
+    if copy_text:
+        def _notify_copy():
+            cmd = ["notify-send", summary, body or "",
+                   f"--icon={icon}", f"--app-name={APP_DISPLAY_NAME}",
+                   "--hint=string:desktop-entry:clipd",
+                   "-A", f"copy=复制验证码 {copy_text}"]
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True)
+                if r.returncode == 0 and "copy" in (r.stdout or ""):
+                    subprocess.run(["xclip", "-selection", "clipboard"],
+                                   input=copy_text.encode(), check=True)
+                    _send_notification("验证码已复制", copy_text,
+                                       icon="edit-copy", expire_time=2000)
+            except Exception:
+                pass
+        threading.Thread(target=_notify_copy, daemon=True).start()
+        return
+
     if open_dir:
         # notify-send --action 支持点击回调，需阻塞等待，放后台线程
         def _notify_with_action():
@@ -723,7 +755,9 @@ class ClipHandler(http.server.BaseHTTPRequestHandler):
             body_text = text if text else ""
             if not body_text and title and title != app_name:
                 body_text = title
-            _send_notification(summary, body_text, icon="notification-message-im", expire_time=6000)
+            code = _extract_code(text or title)
+            _send_notification(summary, body_text, icon="notification-message-im",
+                               expire_time=6000, copy_text=code)
             _stats["notif"] += 1
             _add_log(f"← 通知: {app_name} / {title}")
         except Exception as e:

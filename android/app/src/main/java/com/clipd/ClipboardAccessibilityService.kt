@@ -2,12 +2,15 @@ package com.clipd
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.Notification
 import android.content.ClipboardManager
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import java.net.HttpURLConnection
+import java.net.URL
 
 class ClipboardAccessibilityService : AccessibilityService() {
 
@@ -82,7 +85,18 @@ class ClipboardAccessibilityService : AccessibilityService() {
                 scheduleGeneralCheck()
             }
 
-            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED,
+            AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
+                // 短信通知：从无障碍事件直接提取内容
+                if (pkg == "com.android.mms" || pkg == "com.android.mms.service" ||
+                    pkg == "com.vivo.message") {
+                    handleSmsNotification(event)
+                }
+                if (eventText.length in 1..200 && toastKeywords.any { eventText.contains(it) }) {
+                    Sync.log("📋 复制确认: ${eventText.take(40)} ($pkg)")
+                    scheduleClipboardCheck()
+                }
+            }
+
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
                 if (eventText.length in 1..200 && toastKeywords.any { eventText.contains(it) }) {
                     Sync.log("📋 复制确认: ${eventText.take(40)} ($pkg)")
@@ -157,6 +171,64 @@ class ClipboardAccessibilityService : AccessibilityService() {
             Sync.log("⚠ ClipSyncService 未运行")
         }
     }
+
+    private var lastSmsText = ""
+
+    private fun handleSmsNotification(event: AccessibilityEvent) {
+        val notif = event.parcelableData as? Notification ?: return
+        val extras = notif.extras ?: return
+        val title = extras.getString("android.title") ?: ""
+        val text = extras.getCharSequence("android.text")?.toString() ?: ""
+        val ticker = notif.tickerText?.toString() ?: ""
+
+        // 从 event.text、extras、tickerText 中提取内容
+        val eventText = event.text?.joinToString(" ") ?: ""
+        val content = when {
+            text.isNotBlank() -> text
+            ticker.isNotBlank() -> ticker
+            eventText.isNotBlank() -> eventText
+            else -> return
+        }
+        val sender = if (title.isNotBlank()) title else event.packageName?.toString() ?: "短信"
+
+        // 去重
+        if (content == lastSmsText) return
+        lastSmsText = content
+
+        // 标记已转发，供 NotifListenerService 去重
+        Sync.lastSmsForwardText = content
+        Sync.lastSmsForwardTime = System.currentTimeMillis()
+        Sync.log("📱 SMS(a11y): sender=$sender text=${content.take(30)}")
+
+        val prefs = getSharedPreferences("clipd", MODE_PRIVATE)
+        if (!prefs.getBoolean(NotifListenerService.PREFS_KEY_ENABLED, true)) return
+        if (prefs.getBoolean("manually_stopped", false)) return
+
+        val ip = Sync.ubuntuIp ?: Sync.getSavedUbuntuIp(this)?.also { Sync.ubuntuIp = it } ?: return
+
+        Sync.executor.execute {
+            try {
+                val body = """{"appName":"短信","title":"${sender.esc()}","text":"${content.esc()}"}"""
+                    .toByteArray(Charsets.UTF_8)
+                val conn = URL("http://$ip:${Sync.UBUNTU_HTTP_PORT}/notify")
+                    .openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.doOutput = true
+                conn.connectTimeout = 5_000
+                conn.readTimeout = 5_000
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                conn.outputStream.use { it.write(body) }
+                conn.responseCode
+                conn.disconnect()
+                Sync.log("→ Ubuntu 短信: $sender / ${content.take(20)}")
+            } catch (e: Exception) {
+                Sync.log("⚠ 短信转发失败: ${e.message}")
+            }
+        }
+    }
+
+    private fun String.esc() = replace("\\", "\\\\").replace("\"", "\\\"")
+        .replace("\n", "\\n").replace("\r", "")
 
     override fun onInterrupt() {}
 

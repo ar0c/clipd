@@ -30,43 +30,23 @@ class NotifListenerService : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val pkg = sbn.packageName
-        if (pkg == packageName) return   // 跳过自身通知
-
-        Sync.log("📩 收到通知: $pkg")
-
+        if (pkg == packageName) return
         val prefs = getSharedPreferences("clipd", MODE_PRIVATE)
-        if (!prefs.getBoolean(PREFS_KEY_ENABLED, true)) {
-            Sync.log("⏭ 通知转发已禁用")
-            return
-        }
-        // 用户手动停止同步时，整个 app 静默
-        if (prefs.getBoolean("manually_stopped", false)) {
-            return
-        }
-        // ClipSyncService 不在跑（被系统杀 / 用户从最近任务划掉）→ 视为未同步状态
-        if (ClipSyncService.instance == null) {
-            return
-        }
-
-        // 默认过滤系统应用通知（系统更新、电量、VPN 等）
-        if (isSystemPackage(pkg)) {
-            Sync.log("⏭ 系统通知默认不转发: $pkg")
-            return
-        }
+        if (!prefs.getBoolean(PREFS_KEY_ENABLED, true)) return
+        if (prefs.getBoolean("manually_stopped", false)) return
+        if (ClipSyncService.instance == null) return
 
         val selected = prefs.getStringSet(PREFS_KEY_PACKAGES, emptySet()) ?: emptySet()
         val mode = prefs.getString(PREFS_KEY_MODE, "exclude")
+
+        val explicitIncluded = mode == "include" && pkg in selected
+        if (!explicitIncluded && !isSmsPackage(pkg) && isSystemPackage(pkg)) return
+
         val forward = if (mode == "exclude") pkg !in selected else pkg in selected
-        if (!forward) {
-            Sync.log("⏭ 通知被过滤: $pkg")
-            return
-        }
+        if (!forward && !isSmsPackage(pkg)) return
 
         val now = System.currentTimeMillis()
-        if (now - (lastSentTime[pkg] ?: 0L) < 2_000) {
-            Sync.log("⏭ 通知去抖: $pkg")
-            return
-        }
+        if (now - (lastSentTime[pkg] ?: 0L) < 2_000) return
         lastSentTime[pkg] = now
 
         val ip = Sync.ubuntuIp ?: Sync.getSavedUbuntuIp(this)?.also { Sync.ubuntuIp = it }
@@ -76,13 +56,31 @@ class NotifListenerService : NotificationListenerService() {
         }
 
         val extras  = sbn.notification.extras
-        val title   = extras.getString("android.title") ?: ""
-        val text    = extras.getCharSequence("android.text")?.toString() ?: ""
-        val appName = try {
+        var title   = extras.getString("android.title") ?: ""
+        var text    = extras.getCharSequence("android.text")?.toString() ?: ""
+        var appName = try {
             packageManager.getApplicationLabel(
                 packageManager.getApplicationInfo(pkg, 0)
             ).toString()
         } catch (e: Exception) { pkg }
+
+        // SMS 通知：AccessibilityService 优先处理，NotifListenerService 兜底（锁屏时）
+        if (isSmsPackage(pkg)) {
+            if (title.isEmpty() && text.isEmpty()) {
+                // vivo 的 mms.service 通知无内容，从活跃通知中找短信应用的通知
+                val sms = findSmsFromActiveNotifications(sbn.key)
+                if (sms != null) {
+                    appName = "短信"; title = sms.first; text = sms.second
+                } else return
+            } else {
+                appName = "短信"
+            }
+            // 如果 AccessibilityService 已转发过相同内容，跳过
+            if (text == Sync.lastSmsForwardText &&
+                System.currentTimeMillis() - Sync.lastSmsForwardTime < 5_000) return
+            Sync.lastSmsForwardText = text
+            Sync.lastSmsForwardTime = System.currentTimeMillis()
+        }
 
         Sync.executor.execute {
             try {
@@ -108,6 +106,43 @@ class NotifListenerService : NotificationListenerService() {
 
     private fun String.esc() = replace("\\", "\\\\").replace("\"", "\\\"")
         .replace("\n", "\\n").replace("\r", "")
+
+    private var lastActiveNotifText = ""
+
+    /** 从活跃通知中查找短信内容（遍历所有通知找 SMS 相关应用的带内容通知） */
+    private fun findSmsFromActiveNotifications(excludeKey: String): Pair<String, String>? {
+        return try {
+            val all = activeNotifications ?: return null
+            for (n in all) {
+                if (n.key == excludeKey) continue
+                if (!isSmsPackage(n.packageName) && n.packageName != "com.android.mms") continue
+                val extras = n.notification.extras ?: continue
+                val t = extras.getString("android.title") ?: ""
+                val b = extras.getCharSequence("android.text")?.toString() ?: ""
+                if (b.isNotBlank() && b != lastActiveNotifText) {
+                    lastActiveNotifText = b
+                    Sync.log("📱 SMS(active): $t / ${b.take(30)}")
+                    return Pair(t, b)
+                }
+            }
+            // 也尝试从触发通知自身的 tickerText 或 bigText 提取
+            null
+        } catch (e: Exception) {
+            Sync.log("⚠ activeNotifications 异常: ${e.message}")
+            null
+        }
+    }
+
+    /** 短信/电话相关系统应用，默认放行（SMS 内容由 AccessibilityService 转发） */
+    private fun isSmsPackage(pkg: String): Boolean {
+        val smsApps = setOf(
+            "com.android.mms", "com.android.mms.service",
+            "com.android.messaging", "com.google.android.apps.messaging",
+            "com.vivo.message", "com.samsung.android.messaging",
+            "com.android.phone", "com.vivo.contacts"
+        )
+        return pkg in smsApps
+    }
 
     /** 系统应用判定：FLAG_SYSTEM 或 FLAG_UPDATED_SYSTEM_APP，加上 vivo/android 系统包前缀兜底 */
     private fun isSystemPackage(pkg: String): Boolean {

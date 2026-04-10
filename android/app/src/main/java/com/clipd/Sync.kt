@@ -27,6 +27,8 @@ object Sync {
     @Volatile var ubuntuIp: String? = null
     @Volatile var lastSentHash = ""
     @Volatile var appContext: Context? = null
+    @Volatile var lastSmsForwardText = ""
+    @Volatile var lastSmsForwardTime = 0L
 
     internal val executor = Executors.newCachedThreadPool()
     private var discoverySocket: DatagramSocket? = null

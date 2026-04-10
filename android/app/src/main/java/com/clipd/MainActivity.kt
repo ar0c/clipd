@@ -574,23 +574,30 @@ class MainActivity : AppCompatActivity() {
 
         fun rebuildList(query: String) {
             val q = query.trim()
-            if (q.isBlank()) {
-                filteredPkgs  = allPkgs.toMutableList()
-                filteredNames = allNames.toMutableList()
+            val pairs = if (q.isBlank()) {
+                allNames.zip(allPkgs).toList()
             } else {
-                val pairs = allNames.zip(allPkgs).filter { (name, _) ->
+                allNames.zip(allPkgs).filter { (name, _) ->
                     name.contains(q, ignoreCase = true)
                 }
-                filteredNames = pairs.map { it.first }.toMutableList()
-                filteredPkgs  = pairs.map { it.second }.toMutableList()
             }
+            // 已选中的置顶，组内按字母序
+            val sorted = pairs.sortedWith(compareByDescending<Pair<String, String>> { it.second in selected }
+                .thenBy { it.first })
+            filteredNames = sorted.map { it.first }.toMutableList()
+            filteredPkgs  = sorted.map { it.second }.toMutableList()
+
             val names = filteredNames.toTypedArray()
-            val checks = BooleanArray(filteredPkgs.size) { filteredPkgs[it] in selected }
             lvApps.adapter = android.widget.ArrayAdapter(
                 this, android.R.layout.simple_list_item_multiple_choice, names
             )
             lvApps.choiceMode = ListView.CHOICE_MODE_MULTIPLE
-            checks.forEachIndexed { i, v -> lvApps.setItemChecked(i, v) }
+            // post 到下一帧确保 adapter 已 layout，setItemChecked 才生效
+            lvApps.post {
+                filteredPkgs.forEachIndexed { i, pkg ->
+                    lvApps.setItemChecked(i, pkg in selected)
+                }
+            }
         }
 
         rebuildList("")
