@@ -193,25 +193,60 @@ def _extract_code(text: str) -> str:
     return ""
 
 
+# Android appName → 本机 StatusNotifierItem 进程名映射
+_APP_SNI_MAP = {
+    "微信": "wechat",
+}
+
+
+def _activate_app_via_sni(process_name: str) -> bool:
+    """通过 StatusNotifierItem D-Bus 协议激活应用窗口（等同于点击托盘图标）"""
+    try:
+        out = subprocess.run(
+            ["busctl", "--user", "list", "--no-pager", "--no-legend"],
+            capture_output=True, text=True, timeout=3
+        ).stdout
+        for line in out.splitlines():
+            if "StatusNotifierItem" in line and process_name in line:
+                sni_name = line.split()[0]
+                subprocess.run(
+                    ["busctl", "--user", "call", sni_name,
+                     "/StatusNotifierItem", "org.kde.StatusNotifierItem",
+                     "Activate", "ii", "0", "0"],
+                    timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _send_notification(summary: str, body: str = "", icon: str = "edit-paste",
                        expire_time: int = 4000, open_dir: str = "",
-                       copy_text: str = ""):
-    if copy_text:
-        def _notify_copy():
+                       copy_text: str = "", activate_app: str = ""):
+    if copy_text or activate_app:
+        def _notify_with_actions():
+            actions = []
+            if copy_text:
+                actions += ["-A", f"copy=复制验证码 {copy_text}"]
+            if activate_app:
+                actions += ["-A", f"open=打开{activate_app}"]
             cmd = ["notify-send", summary, body or "",
                    f"--icon={icon}", f"--app-name={APP_DISPLAY_NAME}",
-                   "--hint=string:desktop-entry:clipd",
-                   "-A", f"copy=复制验证码 {copy_text}"]
+                   "--hint=string:desktop-entry:clipd"] + actions
             try:
                 r = subprocess.run(cmd, capture_output=True, text=True)
-                if r.returncode == 0 and "copy" in (r.stdout or ""):
+                action = (r.stdout or "").strip()
+                if r.returncode == 0 and action == "copy" and copy_text:
                     subprocess.run(["xclip", "-selection", "clipboard"],
                                    input=copy_text.encode(), check=True)
                     _send_notification("验证码已复制", copy_text,
                                        icon="edit-copy", expire_time=2000)
+                elif r.returncode == 0 and action == "open" and activate_app:
+                    _activate_app_via_sni(_APP_SNI_MAP.get(activate_app, ""))
             except Exception:
                 pass
-        threading.Thread(target=_notify_copy, daemon=True).start()
+        threading.Thread(target=_notify_with_actions, daemon=True).start()
         return
 
     if open_dir:
@@ -756,8 +791,10 @@ class ClipHandler(http.server.BaseHTTPRequestHandler):
             if not body_text and title and title != app_name:
                 body_text = title
             code = _extract_code(text or title)
+            activate = app_name if app_name in _APP_SNI_MAP else ""
             _send_notification(summary, body_text, icon="notification-message-im",
-                               expire_time=6000, copy_text=code)
+                               expire_time=6000, copy_text=code,
+                               activate_app=activate)
             _stats["notif"] += 1
             _add_log(f"← 通知: {app_name} / {title}")
         except Exception as e:
